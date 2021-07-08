@@ -203,6 +203,10 @@ class comm::impl {
       ASSERT_MPI(MPI_Send(buffer->data(), buffer->size(), MPI_BYTE, dest, 0,
                           m_comm_async));
       free_buffer(buffer);
+
+      auto indices =find_lr_indices(dest);
+      if(rank() == 0){//std::cout<<"LR:"<<dest<<"%%"<<indices.first<<"**"<<indices.second<<"\n";
+}
     }
   }
 
@@ -401,6 +405,16 @@ void listen_small() {
     }
   }
 
+  std::pair<int, int> find_lr_indices(const int dest){
+    int remote_index = dest/m_comm_local_size;
+    int local_index = dest % m_comm_local_size;
+
+    //std::cout<<"LR:"<<dest<<"%%"<<local_index<<"**"<<remote_index<<"\n";
+    auto indices = std::make_pair(local_index, remote_index);
+    return indices;
+
+  }
+
   /*
    * @brief Send a large message
    *
@@ -557,6 +571,7 @@ void listen_small() {
     );
     ASSERT_MPI(MPI_Comm_size(m_comm_local, &m_comm_local_size));
     ASSERT_MPI(MPI_Comm_rank(m_comm_local, &m_comm_local_rank));
+    
 
     // remote indices
     ASSERT_MPI(
