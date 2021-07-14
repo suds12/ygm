@@ -11,11 +11,12 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <charconv>
 
 #include <ygm/detail/mpi.hpp>
 #include <ygm/detail/ygm_cereal_archive.hpp>
 #include <ygm/meta/functional.hpp>
-#define test_buffer_capacity 50   //This is a smaller  just to test large messages
+#define test_buffer_capacity 1000  //This is smalljust to test large messages
 
 namespace ygm {
 
@@ -39,9 +40,16 @@ class comm::impl {
       m_vec_send_buffers.push_back(allocate_buffer());
     }
 
+    // Allocate intermediate buffers
+    for (int i = 0; i < m_comm_local_size; ++i) {
+      intermediate_send_buffers.push_back(allocate_buffer());
+    }
+
     // launch listener threads
     m_large_listener = std::thread(&impl::listen_large, this);
     m_small_listener = std::thread(&impl::listen_small, this);
+    m_local_listener = std::thread(&impl::listen_local, this);
+
   }
 
   ~impl() {
@@ -50,10 +58,13 @@ class comm::impl {
     MPI_Send(NULL, 0, MPI_BYTE, m_comm_rank, 0, m_comm_async);
     // send kill signal to self (large listener thread)
     MPI_Send(NULL, 0, MPI_BYTE, m_comm_rank, 0, m_comm_large_async);
-    // Join listener thread.
-    //std::cout<<"listners joined \n";
+     // send kill signal to self (local listener thread)
+    MPI_Send(NULL, 0, MPI_BYTE, m_comm_local_rank, 0, m_comm_local);
+    // Join listener threads.
+
     m_large_listener.join();
     m_small_listener.join();
+    m_local_listener.join();
     // Free cloned communicator.
     ASSERT_RELEASE(MPI_Barrier(m_comm_async) == MPI_SUCCESS);
     MPI_Comm_free(&m_comm_async);
@@ -78,6 +89,7 @@ class comm::impl {
       local_receive(std::forward<const SendArgs>(args)...);
     } else {
       m_send_count++;
+      auto dest_index = find_lr_indices(dest); 
       std::vector<char> data =
           pack_lambda(std::forward<const SendArgs>(args)...);
       m_local_bytes_sent += data.size();
@@ -88,11 +100,26 @@ class comm::impl {
         if (data.size() + m_vec_send_buffers[dest]->size() >
             m_buffer_capacity) {
           async_flush(dest);
+          async_inter_flush(dest_index.first);
         }
+//---------------
+        auto header = pack_header(rank(), dest_index.second, data.size()); //from, remote index(dest), size
+        //insert header followed by data to intermediate destination(core offset)
+        intermediate_send_buffers[dest_index.first]->insert(intermediate_send_buffers[dest_index.first]->end(), header.begin(), header.end());
+        intermediate_send_buffers[dest_index.first]->insert(intermediate_send_buffers[dest_index.first]->end(), data.begin(), data.end());
+        //auto temp = intermediate_send_buffers[dest_index.first];
+        //int i = *reinterpret_cast<const uint32_t*>(&intermediate_send_buffers[dest_index.first]);
+        std::cout<<"\n"<<dest_index.first<<" "<<intermediate_send_buffers[dest_index.first]->size();
+//---------------        
+
+
 
         // add data to the to dest buffer
         m_vec_send_buffers[dest]->insert(m_vec_send_buffers[dest]->end(),
                                          data.begin(), data.end());
+
+
+
       } else {  // Large message
         send_large_message(data, dest);
       }
@@ -100,6 +127,22 @@ class comm::impl {
     // check if listener has queued receives to process
     if (receive_queue_peek_size() > 0) { receive_queue_process(); }
   }
+
+  std::vector<char> pack_header(int src, int dest, int data_size){
+    /*Probably there is a more efficient way to do this*/
+    
+    std::vector<int> header_int {src, dest, data_size};
+    std::vector<char> header;
+    std::transform(std::begin(header_int), std::end(header_int), std::back_inserter(header), [](int i) { return (char)i; });
+
+    std::vector<int> temp;
+    std::transform(std::begin(header), std::end(header), std::back_inserter(temp), [](char i) { return (int)i; });
+    //std::cout<<data_size<<"$$"<<temp[2]<<(char)data_size;
+
+    return header;
+
+  }
+
 
   // //
   // // Blocking barrier
@@ -203,11 +246,16 @@ class comm::impl {
       ASSERT_MPI(MPI_Send(buffer->data(), buffer->size(), MPI_BYTE, dest, 0,
                           m_comm_async));
       free_buffer(buffer);
-
-      auto indices =find_lr_indices(dest);
-      if(rank() == 0){//std::cout<<"LR:"<<dest<<"%%"<<indices.first<<"**"<<indices.second<<"\n";
-}
     }
+  }
+
+  void async_inter_flush(int index){
+    if (intermediate_send_buffers[index]->size() == 0) return;
+    auto buffer = allocate_buffer();
+    std::swap(buffer, intermediate_send_buffers[index]);
+    ASSERT_MPI(MPI_Send(buffer->data(), buffer->size(), MPI_BYTE, index, 0,
+                        m_comm_local));
+    free_buffer(buffer);
   }
 
   void async_flush_all() {
@@ -376,8 +424,6 @@ class comm::impl {
     }
   }
 
-
-
 void listen_small() {
     while (true) {
       auto recv_buffer = allocate_buffer();
@@ -405,15 +451,32 @@ void listen_small() {
     }
   }
 
-  std::pair<int, int> find_lr_indices(const int dest){
-    int remote_index = dest/m_comm_local_size;
-    int local_index = dest % m_comm_local_size;
+void listen_local() {
+    while (true) {
+      auto recv_buffer = allocate_buffer();
+      recv_buffer->resize(m_buffer_capacity);  // TODO:  does this clear?
+      MPI_Status status;
+      ASSERT_MPI(MPI_Recv(recv_buffer->data(), m_buffer_capacity, MPI_BYTE,
+                          MPI_ANY_SOURCE, MPI_ANY_TAG, m_comm_local, &status));
+      // Check for kill signal
+      if (status.MPI_SOURCE == m_comm_local_rank) break;
 
-    //std::cout<<"LR:"<<dest<<"%%"<<local_index<<"**"<<remote_index<<"\n";
-    auto indices = std::make_pair(local_index, remote_index);
-    return indices;
-
+      // Add buffer to receive queue
+      transit_queue_push_back(recv_buffer, status.MPI_SOURCE);
+      
+    }
   }
+
+
+std::pair<int, int> find_lr_indices(const int dest){
+  int remote_index = dest/m_comm_local_size;
+  int local_index = dest % m_comm_local_size;
+
+  //std::cout<<"LR:"<<dest<<"%%"<<local_index<<"**"<<remote_index<<"\n";
+  auto indices = std::make_pair(local_index, remote_index);
+  return indices;
+
+}
 
   /*
    * @brief Send a large message
@@ -492,6 +555,18 @@ void listen_small() {
       std::scoped_lock lock(m_receive_queue_mutex);
       m_receive_queue.push_back(std::make_pair(b, from));
       current_size = m_receive_queue.size();
+    }
+    if (current_size > 16) {
+      std::this_thread::sleep_for(std::chrono::microseconds(current_size - 16));
+    }
+  }
+
+  void transit_queue_push_back(std::shared_ptr<std::vector<char>> b, int from) {
+    size_t current_size = 0;
+    {
+      std::scoped_lock lock(m_transit_queue_mutex);
+      m_transit_queue.push_back(std::make_pair(b, from));
+      current_size = m_transit_queue.size();
     }
     if (current_size > 16) {
       std::this_thread::sleep_for(std::chrono::microseconds(current_size - 16));
@@ -597,16 +672,20 @@ void listen_small() {
   size_t m_buffer_capacity;
 
   std::vector<std::shared_ptr<std::vector<char>>> m_vec_send_buffers;
-
+  std::vector<std::shared_ptr<std::vector<char>>> intermediate_send_buffers;
   std::mutex m_vec_free_buffers_mutex;
   std::vector<std::shared_ptr<std::vector<char>>> m_vec_free_buffers;
 
   std::deque<std::pair<std::shared_ptr<std::vector<char>>, int>>
       m_receive_queue;
+  std::deque<std::pair<std::shared_ptr<std::vector<char>>, int>>
+      m_transit_queue;    
   std::mutex m_receive_queue_mutex;
+  std::mutex m_transit_queue_mutex;
 
   std::thread m_large_listener;
   std::thread m_small_listener;
+  std::thread m_local_listener;
 
   int64_t m_recv_count = 0;
   int64_t m_send_count = 0;
