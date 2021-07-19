@@ -9,7 +9,9 @@ int main(int argc, char** argv) {
 
   ygm::comm world(&argc, &argv);
 
-  std::string small_message = "Ground Control to Major Tom";
+  std::string small_message1 = "Ground Control to Major Tom";
+  std::string small_message2 = "T";
+  std::string small_message3 = "Che ";
 
   std::string large_message = "Take your protein pills and put your helmet on. Commencing countdown, engines on. Check ignition and may God's love be with you.";
 
@@ -23,11 +25,13 @@ int main(int argc, char** argv) {
 
   //0 send small message to everyone and large message only to 1
   if (world.rank() == 0) {
-    for (int dest = 0; dest < world.size(); ++dest) {
-      world.async(dest, howdy, small_message);
-    }
+    // for (int dest = 0; dest < world.size(); ++dest) {
+    //   world.async(dest, howdy, small_message);
+    // }
 
-     world.async(1, howdy, large_message);
+     world.async(5, howdy, small_message1);
+     world.async(5, howdy, small_message3);
+     world.async(5, howdy, small_message2);
     // world.async(1, howdy, small_message);
   }
   return 0;
