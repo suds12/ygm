@@ -24,7 +24,7 @@ int main(int argc, char** argv) {
   };
 
   //0 send small message to everyone and large message only to 1
-  if (world.rank() == 0) {
+  if (world.rank() == 2) {
     // for (int dest = 0; dest < world.size(); ++dest) {
     //   world.async(dest, howdy, small_message);
     // }

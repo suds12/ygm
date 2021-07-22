@@ -16,7 +16,7 @@
 #include <ygm/detail/mpi.hpp>
 #include <ygm/detail/ygm_cereal_archive.hpp>
 #include <ygm/meta/functional.hpp>
-#define test_buffer_capacity 100 //This is smalljust to test large messages
+#define test_buffer_capacity 500 //This is smalljust to test large messages
 
 namespace ygm {
 
@@ -54,9 +54,10 @@ class comm::impl {
     m_large_listener = std::thread(&impl::listen_large, this);
     m_small_listener = std::thread(&impl::listen_small, this);
     m_local_listener = std::thread(&impl::listen_local, this);
-    m_remote_listener = std::thread(&impl::listen_remote, this);
+    //m_remote_listener = std::thread(&impl::listen_remote, this);
 
   }
+  int pos = 0; ////REMOVE
 
   ~impl() {
     barrier();
@@ -67,7 +68,7 @@ class comm::impl {
      // send kill signal to self (local listener thread)
     MPI_Send(NULL, 0, MPI_BYTE, m_comm_local_rank, 0, m_comm_local);
     // send kill signal to self (remote listener thread)
-    MPI_Send(NULL, 0, MPI_BYTE, m_comm_remote_rank, 0, m_comm_remote);
+    //MPI_Send(NULL, 0, MPI_BYTE, m_comm_remote_rank, 0, m_comm_remote);
 
 
     // Join listener threads.
@@ -75,7 +76,7 @@ class comm::impl {
     m_large_listener.join();
     m_small_listener.join();
     m_local_listener.join();
-    m_remote_listener.join();
+    //m_remote_listener.join();
     // Free cloned communicator.
     ASSERT_RELEASE(MPI_Barrier(m_comm_async) == MPI_SUCCESS);
     MPI_Comm_free(&m_comm_async);
@@ -126,12 +127,11 @@ class comm::impl {
         //async_inter_flush(dest_index.first);//REMOVE THIS >>>>>>>>
         
         //insert header followed by data to intermediate destination(core offset)
+        pos = pos + header.size() + data.size();
+        std::cout<<"\n pos:"<<pos;
         intermediate_send_buffers[dest_index.first]->insert(intermediate_send_buffers[dest_index.first]->end(), header.begin(), header.end());
         intermediate_send_buffers[dest_index.first]->insert(intermediate_send_buffers[dest_index.first]->end(), data.begin(), data.end());
-        //auto temp = intermediate_send_buffers[dest_index.first];
-        //int i = *reinterpret_cast<const uint32_t*>(&intermediate_send_buffers[dest_index.first]);
-        //std::cout<<"\n"<<dest_index.first<<" "<<intermediate_send_buffers[dest_index.first]->size();
-//---------------        
+        
         // add data to the to dest buffer
         m_vec_send_buffers[dest]->insert(m_vec_send_buffers[dest]->end(),
                                          data.begin(), data.end());
@@ -147,22 +147,28 @@ class comm::impl {
     // check if listener has queued receives to process
     if (transit_queue_peek_size() > 0) { transit_queue_process(); }
     // check if listener has queued receives to process
-    if (arrival_queue_peek_size() > 0) { arrival_queue_process(); }
+    //if (arrival_queue_peek_size() > 0) { arrival_queue_process(); }
   }
+
+
+//Should will move this somewhere cleaner.
+  struct header_t {
+  uint64_t src : 16;
+  uint64_t dst : 16;
+  uint64_t len : 32;
+} __attribute__((packed));
+
 
   std::vector<char> pack_header(int src, int dest, int data_size){
     /*Probably there is a more efficient way to do this*/
-    
-    std::vector<uint32_t> header_int {(uint32_t)dest, (uint32_t)src, (uint32_t)data_size};
-    std::vector<char> header;
-    std::transform(std::begin(header_int), std::end(header_int), std::back_inserter(header), [](uint32_t i) { return (char)i; });
 
+    header_t hdr_struct{(uint64_t)src, (uint64_t)dest, (uint64_t)data_size};
+    std::cout<<"\nxxsrc : "<<hdr_struct.len<<"\n";
 
-    std::vector<uint32_t> temp;
-    std::transform(std::begin(header), std::end(header), std::back_inserter(temp), [](char i) { return (int)i; });
-    //std::cout<<src<<"**"<<temp[0]<<"\n";
+    auto ptr = reinterpret_cast<const char*>(&hdr_struct);
+    auto hdr = std::vector<char>(ptr, ptr + sizeof(header_t));
 
-    return header;
+    return hdr;
 
   }
 
@@ -202,11 +208,11 @@ class comm::impl {
       std::this_thread::yield();
     } while (transit_queue_process());
 
-    arrival_queue_process();
-    do {
-      async_final_flush_all();
-      std::this_thread::yield();
-    } while (arrival_queue_process());
+    // arrival_queue_process();
+    // do {
+    //   async_final_flush_all();
+    //   std::this_thread::yield();
+    // } while (arrival_queue_process());
   }
 
   void barrier() {
@@ -292,7 +298,9 @@ class comm::impl {
     std::swap(buffer, intermediate_send_buffers[index]);
     ASSERT_MPI(MPI_Send(buffer->data(), buffer->size(), MPI_BYTE, index, 0,
                         m_comm_local));
-    //std::cout<<index<<" getting bytes : "<<buffer->size()<<"\n";
+    char* hdr_stream = &(*buffer->begin());
+        header_t* hdr = reinterpret_cast<header_t*>(hdr_stream);
+    std::cout<<hdr->src<<" getting bytes : "<<hdr->len<<"\n";
     free_buffer(buffer);
   }
 
@@ -763,7 +771,59 @@ std::pair<int, int> find_lr_indices(const int dest){
     return received;
   }
 
-  bool transit_queue_process() {
+  // bool transit_queue_process() {
+  //   bool received = false;
+  //   while (true) {
+  //     auto buffer_source = transit_queue_try_pop();
+  //     auto buffer = buffer_source.first;
+  //     if (buffer == nullptr) {break;}
+  //     int from = buffer_source.second;
+  //     received = true;
+  //     std::vector<char>::iterator bitr;
+
+  //     int dest, src, size;
+  //     int step = 0;
+  //     int new_msg = 0;
+  //     bitr = buffer->begin();
+  //     std::cout<<"&&&"<<buffer->size();
+  //     while(bitr != buffer->end())
+  //     {
+  //       ASSERT_DEBUG(step <= buffer->size());
+  //       if(step == new_msg)
+  //       {
+  //         dest = (int) *bitr++;   //locate the appropriate final buffer
+  //         src = (int) *bitr;
+  //         auto *begin_pack = &*bitr;   //pack everything from the second position to appropriate final buffer. Don't need to pack dest ID
+  //         int pack_size = size + 2;
+  //         bitr++; 
+  //         size = (int) *bitr++;
+  //         step+=3;
+  //         new_msg+=size + 3;
+
+  //         if (pack_size + final_send_buffers[dest]->size() >
+  //             m_buffer_capacity){
+  //             async_final_flush(dest);            
+  //         }
+
+  //         final_send_buffers[dest]->insert(final_send_buffers[dest]->end(), begin_pack, begin_pack + pack_size);
+  //         //std::cout<<"\n"<<"memcpy to "<<dest<<" : "<<size<<" bytes\n";
+  //         //std::cout<<"\n"<<"Next header at "<<dest<<" : "<<new_msg<<"\n";
+  //         step += size;
+  //         bitr += size;
+  //       }
+  //     }
+  //     //-----
+  //     std::vector<char>::iterator titr;
+  //     titr = final_send_buffers[0]->begin();
+  //     std::cout<<"\n^^^^^^^^^"<<(int) titr[0]++<<" "<<(int) titr[1]<<" "<<titr[2];
+  //     //----
+  //     // Only keep buffers of size m_buffer_capacity in pool of buffers
+  //     if (buffer->size() == m_buffer_capacity) free_buffer(buffer);
+  //   }
+  //   return received;
+  // }
+
+    bool transit_queue_process() {
     bool received = false;
     while (true) {
       auto buffer_source = transit_queue_try_pop();
@@ -772,37 +832,40 @@ std::pair<int, int> find_lr_indices(const int dest){
       int from = buffer_source.second;
       received = true;
       std::vector<char>::iterator bitr;
-
       int dest, src, size;
       int step = 0;
       int new_msg = 0;
       bitr = buffer->begin();
-      std::cout<<"&&&"<<buffer->size();
-      while(bitr != buffer->end())
+      std::cout<<"\n buffer_size : "<<buffer->size()<<"%"<<*(bitr+2);
+
+      while(step < buffer->size())
       {
-        ASSERT_DEBUG(step <= buffer->size());
-        if(step == new_msg)
-        {
-          dest = (int) *bitr++;   //locate the appropriate final buffer
-          src = (int) *bitr;
-          auto *begin_pack = &*bitr;   //pack everything from the second position to appropriate final buffer. Don't need to pack dest ID
-          int pack_size = size + 2;
-          bitr++; 
-          size = (int) *bitr++;
-          step+=3;
-          new_msg+=size + 3;
+        ASSERT_DEBUG(step < buffer->size());
 
-          if (pack_size + final_send_buffers[dest]->size() >
-              m_buffer_capacity){
-              async_final_flush(dest);            
-          }
+        char* hdr_stream = &(*bitr);
+        header_t* hdr = reinterpret_cast<header_t*>(hdr_stream);
+        std::cout<<"\nstep  : "<<step<<" len: "<<hdr->len<<"\n";
+        
 
-          final_send_buffers[dest]->insert(final_send_buffers[dest]->end(), begin_pack, begin_pack + pack_size);
-          //std::cout<<"\n"<<"memcpy to "<<dest<<" : "<<size<<" bytes\n";
-          //std::cout<<"\n"<<"Next header at "<<dest<<" : "<<new_msg<<"\n";
-          step += size;
-          bitr += size;
+        // dest = (int) *bitr++;   //locate the appropriate final buffer
+        // src = (int) *bitr;
+        char* begin_pack = &(*bitr);
+        char* next_pack = begin_pack + hdr->len + sizeof(header_t); //pack = header + data
+        // size = (int) *bitr++;
+        // step+=3;
+        // new_msg+=size + 3;
+
+        if (hdr->len + sizeof(header_t) + final_send_buffers[hdr->dst]->size() >
+            m_buffer_capacity){
+            //async_final_flush(hdr->dst);            
         }
+
+        final_send_buffers[hdr->dst]->insert(final_send_buffers[hdr->dst]->end(), begin_pack, (next_pack));
+        std::cout<<"\n"<<"memcpy to "<<hdr->src<<" : "<<hdr->len<<" bytes\n";
+        //std::cout<<"\n"<<"Next header : "<<new_msg<<"\n";
+        step += hdr->len + sizeof(header_t);
+        bitr += step;
+        //break;
       }
       // Only keep buffers of size m_buffer_capacity in pool of buffers
       if (buffer->size() == m_buffer_capacity) free_buffer(buffer);
@@ -812,40 +875,43 @@ std::pair<int, int> find_lr_indices(const int dest){
 
   bool arrival_queue_process() {
     bool received = false;
-    while (true) {
-      auto buffer_source = arrival_queue_try_pop();
-      auto buffer = buffer_source.first;
-      if (buffer == nullptr) {break;}
-      int from = buffer_source.second;
-      received = true;
-      std::vector<char>::iterator bitr;
+    // while (true) {
+    //   auto buffer_source = arrival_queue_try_pop();
+    //   auto buffer = buffer_source.first;
+    //   if (buffer == nullptr) {break;}
+    //   int from = buffer_source.second;
+       received = true;
+    //   std::vector<char>::iterator bitr;
+    //   bitr = buffer->begin();
+    //   std::cout<<"\n^^^^^^^^^"<<(int) bitr[0]<<" "<<(int) bitr[1];
 
-      int src, size;
-      int step = 0;
-      int new_msg = 0;
-      bitr = buffer->begin();
-      std::cout<<"@@@"<<buffer->size();
-      while(bitr != buffer->end())
-      {
-        ASSERT_DEBUG(step <= buffer->size());
-        if(step == new_msg)
-        {
-          src = (int) *bitr++;
-          //auto *begin_pack = &*bitr;   //pack everything from the second position to appropriate final buffer. Don't need to pack dest ID
-          //int pack_size = size + 2; 
-          size = (int) *bitr++;
-          step+=2;
-          new_msg+=size + 2;
+    //   int src, size;
+    //   int step = 0;
+    //   int new_msg = 0;
+      
+    //   std::cout<<"@@@"<<buffer->size();
+          
+    //   while(bitr != buffer->end())
+    //   {
+    //     //ASSERT_DEBUG(step <= buffer->size());
+    //     if(step == new_msg)
+    //     {
+    //       src = (int) *bitr++;
+    //       //auto *begin_pack = &*bitr;   //pack everything from the second position to appropriate final buffer. Don't need to pack dest ID
+    //       //int pack_size = size + 2; 
+    //       size = (int) *bitr++;
+    //       step+=2;
+    //       new_msg+=size + 2;
 
-          std::cout<<"\n"<<src<<" sent "<<size<<" bytes\n";
-          //std::cout<<"\n"<<"Next header at "<<dest<<" : "<<new_msg<<"\n";
-          step += size;
-          bitr += size;
-        }
-      }
-      // Only keep buffers of size m_buffer_capacity in pool of buffers
-      if (buffer->size() == m_buffer_capacity) free_buffer(buffer);
-    }
+    //       std::cout<<"\n"<<src<<" sent "<<size<<" bytes\n";
+    //       //std::cout<<"\n"<<"Next header at "<<dest<<" : "<<new_msg<<"\n";
+    //       step += size;
+    //       bitr += size;
+    //     }
+    //   }
+    //   // Only keep buffers of size m_buffer_capacity in pool of buffers
+    //   if (buffer->size() == m_buffer_capacity) free_buffer(buffer);
+    // }
     return received;
   }
 
