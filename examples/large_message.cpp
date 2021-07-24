@@ -9,9 +9,12 @@ int main(int argc, char** argv) {
 
   ygm::comm world(&argc, &argv);
 
-  std::string small_message1 = "Ground Control to Major Tom";
-  std::string small_message2 = "T";
-  std::string small_message3 = "Che ";
+  std::string small_message1 = "Ground Control to Major Tom"; //43
+  //std::string small_message2 = "T";
+  std::string small_message3 = "Che ";   //28
+  std::string small_message4 = "jojolokocsdd ";
+  std::string small_message5 = "hahaha ";
+  std::string small_message6 = "kojohgiugkfvsadsddqf ";
 
   std::string large_message = "Take your protein pills and put your helmet on. Commencing countdown, engines on. Check ignition and may God's love be with you.";
 
@@ -29,9 +32,14 @@ int main(int argc, char** argv) {
     //   world.async(dest, howdy, small_message);
     // }
 
-     world.async(5, howdy, small_message1);
-     world.async(5, howdy, small_message3);
-     world.async(5, howdy, small_message2);
+     world.async(1, howdy, small_message1);
+     world.async(3, howdy, small_message3);
+     world.async(4, howdy, small_message4);
+     world.async(4, howdy, small_message5);
+     world.async(4, howdy, small_message6);
+     // world.async(5, howdy, small_message6);
+
+
     // world.async(1, howdy, small_message);
   }
   return 0;

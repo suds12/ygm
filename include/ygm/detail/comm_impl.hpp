@@ -57,7 +57,7 @@ class comm::impl {
     //m_remote_listener = std::thread(&impl::listen_remote, this);
 
   }
-  int pos = 0; ////REMOVE
+
 
   ~impl() {
     barrier();
@@ -116,19 +116,22 @@ class comm::impl {
 //---------------
          //from, remote index(dest), size
         auto header = pack_header(rank(), dest_index.second, data.size());
+        header_t* hdr = reinterpret_cast<header_t*>(&header);
         //std::cout<<data.size()<<" ^^ "<<header.size() <<" %% "<< m_buffer_capacity<<"\n";
         if (data.size() + header.size() < m_buffer_capacity) {
           // check if buffer doesn't have enough space
           if (data.size() + header.size() + intermediate_send_buffers[dest_index.first]->size() >
-              m_buffer_capacity) {
+              m_buffer_capacity - sizeof(char)) {
+            intermediate_send_buffers[dest_index.first]->push_back(0); //Null terminating the buffer
             async_inter_flush(dest_index.first);
           }
         }
         //async_inter_flush(dest_index.first);//REMOVE THIS >>>>>>>>
         
         //insert header followed by data to intermediate destination(core offset)
-        pos = pos + header.size() + data.size();
-        std::cout<<"\n pos:"<<pos;
+        
+     
+
         intermediate_send_buffers[dest_index.first]->insert(intermediate_send_buffers[dest_index.first]->end(), header.begin(), header.end());
         intermediate_send_buffers[dest_index.first]->insert(intermediate_send_buffers[dest_index.first]->end(), data.begin(), data.end());
         
@@ -163,7 +166,7 @@ class comm::impl {
     /*Probably there is a more efficient way to do this*/
 
     header_t hdr_struct{(uint64_t)src, (uint64_t)dest, (uint64_t)data_size};
-    std::cout<<"\nxxsrc : "<<hdr_struct.len<<"\n";
+    std::cout<<"\nlen_before : "<<hdr_struct.len<<" to "<<dest<<"\n";
 
     auto ptr = reinterpret_cast<const char*>(&hdr_struct);
     auto hdr = std::vector<char>(ptr, ptr + sizeof(header_t));
@@ -295,12 +298,16 @@ class comm::impl {
   void async_inter_flush(int index){
     if (intermediate_send_buffers[index]->size() == 0) return;
     auto buffer = allocate_buffer();
+    //--
+      intermediate_send_buffers[index]->push_back(0);
+      std::cout<<"\n "<<rank()<<" is flushing size "<<intermediate_send_buffers[index]->size()<<" to "<<index;
+      //--
     std::swap(buffer, intermediate_send_buffers[index]);
     ASSERT_MPI(MPI_Send(buffer->data(), buffer->size(), MPI_BYTE, index, 0,
                         m_comm_local));
-    char* hdr_stream = &(*buffer->begin());
-        header_t* hdr = reinterpret_cast<header_t*>(hdr_stream);
-    std::cout<<hdr->src<<" getting bytes : "<<hdr->len<<"\n";
+    //-------------------------
+      std::cout<<"\n buffer_size_before : "<<rank()<<" --"<<buffer->size()<<"\n";
+      //-----------------
     free_buffer(buffer);
   }
 
@@ -751,7 +758,7 @@ std::pair<int, int> find_lr_indices(const int dest){
     while (true) {
       auto buffer_source = receive_queue_try_pop();
       auto buffer = buffer_source.first;
-      if (buffer == nullptr) break;
+      if (buffer == nullptr) {break;}
       int from = buffer_source.second;
       received = true;
       cereal::YGMInputArchive iarchive(buffer->data(), buffer->size());
@@ -831,29 +838,21 @@ std::pair<int, int> find_lr_indices(const int dest){
       if (buffer == nullptr) {break;}
       int from = buffer_source.second;
       received = true;
-      std::vector<char>::iterator bitr;
-      int dest, src, size;
+      char* bitr = &buffer->at(0);
       int step = 0;
-      int new_msg = 0;
-      bitr = buffer->begin();
-      std::cout<<"\n buffer_size : "<<buffer->size()<<"%"<<*(bitr+2);
 
-      while(step < buffer->size())
+      std::cout<<"\n buffer_size_after : "<<rank()<<" ____"<<buffer->size()<<"\n";
+
+      while(step < buffer->size() && *bitr != '\0')
       {
         ASSERT_DEBUG(step < buffer->size());
 
         char* hdr_stream = &(*bitr);
         header_t* hdr = reinterpret_cast<header_t*>(hdr_stream);
-        std::cout<<"\nstep  : "<<step<<" len: "<<hdr->len<<"\n";
+        std::cout<<"\n"<<rank()<<" is taking step  : "<<step<<" len: "<<hdr->len<<"\n";
         
-
-        // dest = (int) *bitr++;   //locate the appropriate final buffer
-        // src = (int) *bitr;
         char* begin_pack = &(*bitr);
         char* next_pack = begin_pack + hdr->len + sizeof(header_t); //pack = header + data
-        // size = (int) *bitr++;
-        // step+=3;
-        // new_msg+=size + 3;
 
         if (hdr->len + sizeof(header_t) + final_send_buffers[hdr->dst]->size() >
             m_buffer_capacity){
@@ -861,10 +860,10 @@ std::pair<int, int> find_lr_indices(const int dest){
         }
 
         final_send_buffers[hdr->dst]->insert(final_send_buffers[hdr->dst]->end(), begin_pack, (next_pack));
-        std::cout<<"\n"<<"memcpy to "<<hdr->src<<" : "<<hdr->len<<" bytes\n";
-        //std::cout<<"\n"<<"Next header : "<<new_msg<<"\n";
+        //std::cout<<"\n"<<"memcpy to "<<hdr->src<<" : "<<hdr->len<<" bytes\n";
         step += hdr->len + sizeof(header_t);
-        bitr += step;
+        bitr = &buffer->at(step);
+        
         //break;
       }
       // Only keep buffers of size m_buffer_capacity in pool of buffers
