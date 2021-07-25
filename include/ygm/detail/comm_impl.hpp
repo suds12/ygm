@@ -16,7 +16,7 @@
 #include <ygm/detail/mpi.hpp>
 #include <ygm/detail/ygm_cereal_archive.hpp>
 #include <ygm/meta/functional.hpp>
-#define test_buffer_capacity 50 //This is smalljust to test large messages
+#define test_buffer_capacity 45 //This is smalljust to test large messages
 
 namespace ygm {
 
@@ -35,11 +35,7 @@ class comm::impl {
     // Get node/core indices
     init_local_remote_comms();
 
-    // // Allocate send buffers
-    // for (int i = 0; i < m_comm_size; ++i) {
-    //   m_vec_send_buffers.push_back(allocate_buffer());
-    // }
-
+   
     // Allocate intermediate send buffers
     for (int i = 0; i < m_comm_local_size; ++i) {
       intermediate_send_buffers.push_back(allocate_buffer());
@@ -52,7 +48,6 @@ class comm::impl {
 
     // launch listener threads
     m_large_listener = std::thread(&impl::listen_large, this);
-    //m_small_listener = std::thread(&impl::listen_small, this);
     m_local_listener = std::thread(&impl::listen_local, this);
     m_remote_listener = std::thread(&impl::listen_remote, this);
 
@@ -61,8 +56,6 @@ class comm::impl {
 
   ~impl() {
     barrier();
-    // send kill signal to self (small listener thread)
-    //MPI_Send(NULL, 0, MPI_BYTE, m_comm_rank, 0, m_comm_async);
     // send kill signal to self (large listener thread)
     MPI_Send(NULL, 0, MPI_BYTE, m_comm_rank, 0, m_comm_large_async);
      // send kill signal to self (local listener thread)
@@ -70,11 +63,8 @@ class comm::impl {
     //send kill signal to self (remote listener thread)
     MPI_Send(NULL, 0, MPI_BYTE, m_comm_remote_rank, 0, m_comm_remote);
 
-
     // Join listener threads.
-
     m_large_listener.join();
-    //m_small_listener.join();
     m_local_listener.join();
     m_remote_listener.join();
     // Free cloned communicator.
@@ -105,43 +95,27 @@ class comm::impl {
       std::vector<char> data =
           pack_lambda(std::forward<const SendArgs>(args)...);
       m_local_bytes_sent += data.size();
-      //if(rank() == 0){std::cout<<data.size()<<"$$"<<m_buffer_capacity<<"\n";}
-        
+
       if (data.size() + sizeof(header_t) < m_buffer_capacity) {
         // check if buffer doesn't have enough space
-
-//---------------
-         //from, remote index(dest), size
         auto header = pack_header(rank(), dest_index.second, data.size());
-        header_t* hdr = reinterpret_cast<header_t*>(&header);
-        //std::cout<<data.size()<<" ^^ "<<header.size() <<" %% "<< m_buffer_capacity<<"\n";
-        
+        header_t* hdr = reinterpret_cast<header_t*>(&header);        
         // check if buffer doesn't have enough space
         if (data.size() + header.size() + intermediate_send_buffers[dest_index.first]->size() >
             m_buffer_capacity - sizeof(char)) {
           async_inter_flush(dest_index.first);
         }
-        
-
         //insert header followed by data to intermediate destination(core offset)
         intermediate_send_buffers[dest_index.first]->insert(intermediate_send_buffers[dest_index.first]->end(), header.begin(), header.end());
         intermediate_send_buffers[dest_index.first]->insert(intermediate_send_buffers[dest_index.first]->end(), data.begin(), data.end());
-        
-        // add data to the to dest buffer
-        // m_vec_send_buffers[dest]->insert(m_vec_send_buffers[dest]->end(),
-        //                                  data.begin(), data.end());
-
-
 
       } else {  // Large message
         send_large_message(data, dest);
       }
     }
-    // check if listener has queued receives to process
-    //if (receive_queue_peek_size() > 0) { receive_queue_process(); }
-    // check if listener has queued receives to process
+    // check if intermediate listener has queued transits to process
     if (transit_queue_peek_size() > 0) { transit_queue_process(); }
-    //check if listener has queued receives to process
+    //check if final listener has queued arrivals to process
     if (arrival_queue_peek_size() > 0) { arrival_queue_process(); }
   }
 
@@ -191,12 +165,6 @@ class comm::impl {
   // }
 
   void wait_local_idle() {
-    //receive_queue_process();
-    // do {
-    //   async_flush_all();
-    //   std::this_thread::yield();
-    // } while (receive_queue_process());
-
     transit_queue_process();
     do {
       async_inter_flush_all();
@@ -312,8 +280,7 @@ class comm::impl {
       std::cout<<index<<" getting bytes : "<<buffer->size()<<"\n";
       free_buffer(buffer);
     }
-    else{//For local messages, we directly add the buffer to the arrival queue 
-
+    else{//For local messages, we copy the buffer and add it to the arrival queue 
       if (final_send_buffers[index]->size() == 0) return;
       auto buffer = allocate_buffer();
       buffer->resize(m_self_buffer_count);  //We have to resize using counters and not MPI status
@@ -466,39 +433,24 @@ class comm::impl {
    */
   void listen_large() {
     while (true) {
-      auto recv_buffer = allocate_buffer();
-      /*
-      I believe we don't need to resize to full capacity here as this is always going to be the announcer message
-      in this channel and we allocate the actual size after getting this message.
-      */
-      recv_buffer->resize(m_buffer_capacity);  // TODO:  does this clear?
       MPI_Status status;
-      ASSERT_MPI(MPI_Recv(recv_buffer->data(), m_buffer_capacity, MPI_BYTE,
-                          MPI_ANY_SOURCE, MPI_ANY_TAG, m_comm_large_async, &status));
-      int tag = status.MPI_TAG;
-
-      if (tag == large_message_announce_tag) {
-        //Determine size and source of message
-        size_t size = *(reinterpret_cast<size_t *>(recv_buffer->data()));
-        int src = status.MPI_SOURCE;
-
-        // Allocate large buffer
-        auto large_recv_buff = std::make_shared<std::vector<char>>(size);
-
-        // Receive large message
-        receive_large_message(large_recv_buff, src, size);
-
-        // Add buffer to receive queue
-        arrival_queue_push_back(large_recv_buff, src);
-      } else {
-
-        // Check for kill signal
-        if (status.MPI_SOURCE == m_comm_rank) {break;}
-
-        // // Add buffer to receive queue
-        // receive_queue_push_back(recv_buffer, status.MPI_SOURCE);
-
+      ASSERT_MPI(MPI_Probe(MPI_ANY_SOURCE, MPI_ANY_TAG, m_comm_large_async, &status));
+      if (status.MPI_SOURCE == m_comm_rank) {
+        ASSERT_MPI(MPI_Recv(NULL, 0, MPI_BYTE, status.MPI_SOURCE, MPI_ANY_TAG,
+                        m_comm_large_async, MPI_STATUS_IGNORE));
+        break;
       }
+      int tag = status.MPI_TAG;
+      int src = status.MPI_SOURCE;
+      int count;
+      ASSERT_DEBUG(tag == large_message_tag);
+      ASSERT_MPI(MPI_Get_count(&status, MPI_BYTE, &count))
+      // Allocate large buffer
+      auto large_recv_buff = std::make_shared<std::vector<char>>(count);
+     // Receive large message
+      receive_large_message(large_recv_buff, src, count);
+      // Add buffer to arrival queue
+      arrival_queue_push_back(large_recv_buff, src);
     }
   }
 
@@ -515,7 +467,6 @@ void listen_local() {
       recv_buffer->resize(count);
       // Check for kill signal
       if (status.MPI_SOURCE == m_comm_local_rank) break;
-
       // Add buffer to receive queue
       transit_queue_push_back(recv_buffer, -5);
       
@@ -561,8 +512,8 @@ std::pair<int, int> find_lr_indices(const int dest){
   void send_large_message(const std::vector<char> &msg, const int dest) {
     // Announce the large message and its size
     size_t size = msg.size();
-    ASSERT_MPI(MPI_Send(&size, 8, MPI_BYTE, dest, large_message_announce_tag,
-                        m_comm_large_async));
+    // ASSERT_MPI(MPI_Send(&size, 8, MPI_BYTE, dest, large_message_announce_tag,
+    //                     m_comm_large_async));
 
     // Send message
     ASSERT_MPI(MPI_Send(msg.data(), size, MPI_BYTE, dest, large_message_tag,
