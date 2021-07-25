@@ -770,9 +770,9 @@ std::pair<int, int> find_lr_indices(const int dest){
         int64_t iptr;
         iarchive(iptr);
         iptr += (int64_t)&reference;
-        void (*fun_ptr)(impl *, int, cereal::YGMInputArchive &);
-        memcpy(&fun_ptr, &iptr, sizeof(uint64_t));
-        fun_ptr(this, from, iarchive);
+        // void (*fun_ptr)(impl *, int, cereal::YGMInputArchive &);
+        // memcpy(&fun_ptr, &iptr, sizeof(uint64_t));
+        // fun_ptr(this, from, iarchive);
         m_recv_count++;
       }
 
@@ -849,15 +849,24 @@ std::pair<int, int> find_lr_indices(const int dest){
         //std::cout<<"\n"<<rank()<<" is taking step  : "<<step<<" len: "<<hdr->len<<"\n";
         
         char* begin_pack = &(*bitr);
+        char* begin_msg = &(*bitr) + sizeof(header_t);
         char* next_pack = begin_pack + hdr->len + sizeof(header_t); //pack = header + data
+        cereal::YGMInputArchive iarchive(begin_msg, hdr->len);
+        int64_t iptr;
+        iarchive(iptr);
 
+        iptr += (int64_t)&reference;
+        void (*fun_ptr)(impl *, int, cereal::YGMInputArchive &);
+        memcpy(&fun_ptr, &iptr, sizeof(uint64_t));
+        fun_ptr(this, hdr->src, iarchive);
+        m_recv_count++;
         // if (hdr->len + sizeof(header_t) + final_send_buffers[hdr->dst]->size() >
         //     m_buffer_capacity){
         //   //async_final_flush(hdr->dst);
         // }
 
         //final_send_buffers[hdr->dst]->insert(final_send_buffers[hdr->dst]->end(), begin_pack, (next_pack));
-        std::cout<<"\n"<<rank()<<" Got a msg from "<<hdr->src<<" of size "<<hdr->len<<" bytes\n";
+        //std::cout<<"\n"<<rank()<<" Got a msg from "<<hdr->src<<" of size "<<hdr->len<<" bytes\n";
         step += hdr->len + sizeof(header_t);
         bitr = &buffer->at(step);
         
