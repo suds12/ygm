@@ -54,7 +54,7 @@ class comm::impl {
     m_large_listener = std::thread(&impl::listen_large, this);
     m_small_listener = std::thread(&impl::listen_small, this);
     m_local_listener = std::thread(&impl::listen_local, this);
-    //m_remote_listener = std::thread(&impl::listen_remote, this);
+    m_remote_listener = std::thread(&impl::listen_remote, this);
 
   }
 
@@ -67,8 +67,8 @@ class comm::impl {
     MPI_Send(NULL, 0, MPI_BYTE, m_comm_rank, 0, m_comm_large_async);
      // send kill signal to self (local listener thread)
     MPI_Send(NULL, 0, MPI_BYTE, m_comm_local_rank, 0, m_comm_local);
-    // send kill signal to self (remote listener thread)
-    //MPI_Send(NULL, 0, MPI_BYTE, m_comm_remote_rank, 0, m_comm_remote);
+    //send kill signal to self (remote listener thread)
+    MPI_Send(NULL, 0, MPI_BYTE, m_comm_remote_rank, 0, m_comm_remote);
 
 
     // Join listener threads.
@@ -76,7 +76,7 @@ class comm::impl {
     m_large_listener.join();
     m_small_listener.join();
     m_local_listener.join();
-    //m_remote_listener.join();
+    m_remote_listener.join();
     // Free cloned communicator.
     ASSERT_RELEASE(MPI_Barrier(m_comm_async) == MPI_SUCCESS);
     MPI_Comm_free(&m_comm_async);
@@ -122,16 +122,11 @@ class comm::impl {
           // check if buffer doesn't have enough space
           if (data.size() + header.size() + intermediate_send_buffers[dest_index.first]->size() >
               m_buffer_capacity - sizeof(char)) {
-            intermediate_send_buffers[dest_index.first]->push_back(0); //Null terminating the buffer
             async_inter_flush(dest_index.first);
           }
         }
-        //async_inter_flush(dest_index.first);//REMOVE THIS >>>>>>>>
-        
-        //insert header followed by data to intermediate destination(core offset)
-        
-     
 
+        //insert header followed by data to intermediate destination(core offset)
         intermediate_send_buffers[dest_index.first]->insert(intermediate_send_buffers[dest_index.first]->end(), header.begin(), header.end());
         intermediate_send_buffers[dest_index.first]->insert(intermediate_send_buffers[dest_index.first]->end(), data.begin(), data.end());
         
@@ -149,27 +144,27 @@ class comm::impl {
     if (receive_queue_peek_size() > 0) { receive_queue_process(); }
     // check if listener has queued receives to process
     if (transit_queue_peek_size() > 0) { transit_queue_process(); }
-    // check if listener has queued receives to process
-    //if (arrival_queue_peek_size() > 0) { arrival_queue_process(); }
+    //check if listener has queued receives to process
+    if (arrival_queue_peek_size() > 0) { arrival_queue_process(); }
   }
 
 
-//Should will move this somewhere cleaner.
+//Will move this somewhere cleaner.
   struct header_t {
   uint64_t src : 16;
   uint64_t dst : 16;
   uint64_t len : 32;
-} __attribute__((packed));
+  } __attribute__((packed));
 
 
   std::vector<char> pack_header(int src, int dest, int data_size){
     /*Probably there is a more efficient way to do this*/
 
     header_t hdr_struct{(uint64_t)src, (uint64_t)dest, (uint64_t)data_size};
-    std::cout<<"\nlen_before : "<<hdr_struct.len<<" to "<<dest<<"\n";
-
+  
     auto ptr = reinterpret_cast<const char*>(&hdr_struct);
     auto hdr = std::vector<char>(ptr, ptr + sizeof(header_t));
+    std::cout<<"\npacking "<<hdr_struct.len<<" for "<<hdr_struct.dst;
 
     return hdr;
 
@@ -211,11 +206,11 @@ class comm::impl {
       std::this_thread::yield();
     } while (transit_queue_process());
 
-    // arrival_queue_process();
-    // do {
-    //   async_final_flush_all();
-    //   std::this_thread::yield();
-    // } while (arrival_queue_process());
+    arrival_queue_process();
+    do {
+      async_final_flush_all();
+      std::this_thread::yield();
+    } while (arrival_queue_process());
   }
 
   void barrier() {
@@ -296,30 +291,41 @@ class comm::impl {
   }
 
   void async_inter_flush(int index){
-    if (intermediate_send_buffers[index]->size() == 0) return;
-    auto buffer = allocate_buffer();
-    //--
-      intermediate_send_buffers[index]->push_back(0);
-      std::cout<<"\n "<<rank()<<" is flushing size "<<intermediate_send_buffers[index]->size()<<" to "<<index;
-      //--
-    std::swap(buffer, intermediate_send_buffers[index]);
-    ASSERT_MPI(MPI_Send(buffer->data(), buffer->size(), MPI_BYTE, index, 0,
-                        m_comm_local));
-    //-------------------------
-      std::cout<<"\n buffer_size_before : "<<rank()<<" --"<<buffer->size()<<"\n";
-      //-----------------
-    free_buffer(buffer);
+    if (index != m_comm_local_rank) {
+      if (intermediate_send_buffers[index]->size() == 0) return;
+      auto buffer = allocate_buffer();
+      intermediate_send_buffers[index]->push_back(0);// Nullterminating buffer
+      std::swap(buffer, intermediate_send_buffers[index]);
+      ASSERT_MPI(MPI_Send(buffer->data(), buffer->size(), MPI_BYTE, index, 0,
+                          m_comm_local));
+      free_buffer(buffer);
+    }
   }
 
   void async_final_flush(int index){
-    if (final_send_buffers[index]->size() == 0) return;
-    auto buffer = allocate_buffer();
-    std::swap(buffer, final_send_buffers[index]);
-    ASSERT_MPI(MPI_Send(buffer->data(), buffer->size(), MPI_BYTE, index, 0,
-                        m_comm_remote));
-    std::cout<<index<<" getting bytes : "<<buffer->size()<<"\n";
-    free_buffer(buffer);
+    if (index != m_comm_remote_rank) {
+      if (final_send_buffers[index]->size() == 0) return;
+      auto buffer = allocate_buffer();
+      final_send_buffers[index]->push_back(0);// Nullterminating buffer
+      std::swap(buffer, final_send_buffers[index]);
+      ASSERT_MPI(MPI_Send(buffer->data(), buffer->size(), MPI_BYTE, index, 0,
+                          m_comm_remote));
+      std::cout<<index<<" getting bytes : "<<buffer->size()<<"\n";
+      free_buffer(buffer);
+    }
+    else{//For local messages, we directly add the buffer to the arrival queue 
+
+      if (final_send_buffers[index]->size() == 0) return;
+      auto buffer = allocate_buffer();
+      buffer->resize(m_self_buffer_count);  //We have to resize using counters and not MPI status
+      buffer->assign(final_send_buffers[index]->begin(), final_send_buffers[index]->end());
+      buffer->push_back(0);
+      arrival_queue_push_back(buffer, -2); //-2 indicates local message
+      m_self_buffer_count = 0; //reset counter
+      free_buffer(final_send_buffers[index]);
+    }
   }
+
 
   void async_flush_all() {
     for (int i = 0; i < size(); ++i) {
@@ -556,18 +562,16 @@ void listen_local() {
       recv_buffer->resize(m_buffer_capacity);  // TODO:  does this clear?
       MPI_Status status;
       ASSERT_MPI(MPI_Recv(recv_buffer->data(), m_buffer_capacity, MPI_BYTE,
-                          MPI_ANY_SOURCE, MPI_ANY_TAG, m_comm_local, &status));
+                          MPI_ANY_SOURCE, MPI_ANY_TAG, m_comm_remote, &status));
 
       int count;
       ASSERT_MPI(MPI_Get_count(&status, MPI_BYTE, &count))
       recv_buffer->resize(count);
       // Check for kill signal
-      if (status.MPI_SOURCE == m_comm_local_rank) break;
+      if (status.MPI_SOURCE == m_comm_remote_rank) break;
 
       // Add buffer to receive queue
-      arrival_queue_push_back(recv_buffer, status.MPI_SOURCE);
-
-      
+      arrival_queue_push_back(recv_buffer, status.MPI_SOURCE);   
     }
   }
 
@@ -704,7 +708,7 @@ std::pair<int, int> find_lr_indices(const int dest){
   void arrival_queue_push_back(std::shared_ptr<std::vector<char>> b, int from) {
     size_t current_size = 0;
     {
-      std::scoped_lock lock(m_receive_queue_mutex);
+      std::scoped_lock lock(m_arrival_queue_mutex);
       m_arrival_queue.push_back(std::make_pair(b, from));
       current_size = m_arrival_queue.size();
     }
@@ -778,58 +782,6 @@ std::pair<int, int> find_lr_indices(const int dest){
     return received;
   }
 
-  // bool transit_queue_process() {
-  //   bool received = false;
-  //   while (true) {
-  //     auto buffer_source = transit_queue_try_pop();
-  //     auto buffer = buffer_source.first;
-  //     if (buffer == nullptr) {break;}
-  //     int from = buffer_source.second;
-  //     received = true;
-  //     std::vector<char>::iterator bitr;
-
-  //     int dest, src, size;
-  //     int step = 0;
-  //     int new_msg = 0;
-  //     bitr = buffer->begin();
-  //     std::cout<<"&&&"<<buffer->size();
-  //     while(bitr != buffer->end())
-  //     {
-  //       ASSERT_DEBUG(step <= buffer->size());
-  //       if(step == new_msg)
-  //       {
-  //         dest = (int) *bitr++;   //locate the appropriate final buffer
-  //         src = (int) *bitr;
-  //         auto *begin_pack = &*bitr;   //pack everything from the second position to appropriate final buffer. Don't need to pack dest ID
-  //         int pack_size = size + 2;
-  //         bitr++; 
-  //         size = (int) *bitr++;
-  //         step+=3;
-  //         new_msg+=size + 3;
-
-  //         if (pack_size + final_send_buffers[dest]->size() >
-  //             m_buffer_capacity){
-  //             async_final_flush(dest);            
-  //         }
-
-  //         final_send_buffers[dest]->insert(final_send_buffers[dest]->end(), begin_pack, begin_pack + pack_size);
-  //         //std::cout<<"\n"<<"memcpy to "<<dest<<" : "<<size<<" bytes\n";
-  //         //std::cout<<"\n"<<"Next header at "<<dest<<" : "<<new_msg<<"\n";
-  //         step += size;
-  //         bitr += size;
-  //       }
-  //     }
-  //     //-----
-  //     std::vector<char>::iterator titr;
-  //     titr = final_send_buffers[0]->begin();
-  //     std::cout<<"\n^^^^^^^^^"<<(int) titr[0]++<<" "<<(int) titr[1]<<" "<<titr[2];
-  //     //----
-  //     // Only keep buffers of size m_buffer_capacity in pool of buffers
-  //     if (buffer->size() == m_buffer_capacity) free_buffer(buffer);
-  //   }
-  //   return received;
-  // }
-
     bool transit_queue_process() {
     bool received = false;
     while (true) {
@@ -841,7 +793,7 @@ std::pair<int, int> find_lr_indices(const int dest){
       char* bitr = &buffer->at(0);
       int step = 0;
 
-      std::cout<<"\n buffer_size_after : "<<rank()<<" ____"<<buffer->size()<<"\n";
+      //std::cout<<"\n buffer_size_after : "<<rank()<<" ____"<<buffer->size()<<"\n";
 
       while(step < buffer->size() && *bitr != '\0')
       {
@@ -849,20 +801,23 @@ std::pair<int, int> find_lr_indices(const int dest){
 
         char* hdr_stream = &(*bitr);
         header_t* hdr = reinterpret_cast<header_t*>(hdr_stream);
-        std::cout<<"\n"<<rank()<<" is taking step  : "<<step<<" len: "<<hdr->len<<"\n";
+        //std::cout<<"\n"<<rank()<<" is taking step  : "<<step<<" len: "<<hdr->len<<"\n";
         
         char* begin_pack = &(*bitr);
         char* next_pack = begin_pack + hdr->len + sizeof(header_t); //pack = header + data
 
+        
+
         if (hdr->len + sizeof(header_t) + final_send_buffers[hdr->dst]->size() >
-            m_buffer_capacity){
-            //async_final_flush(hdr->dst);            
+            m_buffer_capacity - sizeof(char)){
+          async_final_flush(hdr->dst);
         }
 
         final_send_buffers[hdr->dst]->insert(final_send_buffers[hdr->dst]->end(), begin_pack, (next_pack));
         //std::cout<<"\n"<<"memcpy to "<<hdr->src<<" : "<<hdr->len<<" bytes\n";
         step += hdr->len + sizeof(header_t);
         bitr = &buffer->at(step);
+        if(hdr->dst == m_comm_remote_rank){m_self_buffer_count = step;}
         
         //break;
       }
@@ -874,43 +829,44 @@ std::pair<int, int> find_lr_indices(const int dest){
 
   bool arrival_queue_process() {
     bool received = false;
-    // while (true) {
-    //   auto buffer_source = arrival_queue_try_pop();
-    //   auto buffer = buffer_source.first;
-    //   if (buffer == nullptr) {break;}
-    //   int from = buffer_source.second;
-       received = true;
-    //   std::vector<char>::iterator bitr;
-    //   bitr = buffer->begin();
-    //   std::cout<<"\n^^^^^^^^^"<<(int) bitr[0]<<" "<<(int) bitr[1];
+    while (true) {
+      auto buffer_source = arrival_queue_try_pop();
+      auto buffer = buffer_source.first;
+      if (buffer == nullptr) {break;}
+      int from = buffer_source.second;
+      received = true;
+      char* bitr = &buffer->at(0);
+      int step = 0;
 
-    //   int src, size;
-    //   int step = 0;
-    //   int new_msg = 0;
-      
-    //   std::cout<<"@@@"<<buffer->size();
-          
-    //   while(bitr != buffer->end())
-    //   {
-    //     //ASSERT_DEBUG(step <= buffer->size());
-    //     if(step == new_msg)
-    //     {
-    //       src = (int) *bitr++;
-    //       //auto *begin_pack = &*bitr;   //pack everything from the second position to appropriate final buffer. Don't need to pack dest ID
-    //       //int pack_size = size + 2; 
-    //       size = (int) *bitr++;
-    //       step+=2;
-    //       new_msg+=size + 2;
+      std::cout<<"\n buffer_size_arrival : "<<rank()<<" ____"<<buffer->size()<<"\n";
 
-    //       std::cout<<"\n"<<src<<" sent "<<size<<" bytes\n";
-    //       //std::cout<<"\n"<<"Next header at "<<dest<<" : "<<new_msg<<"\n";
-    //       step += size;
-    //       bitr += size;
-    //     }
-    //   }
-    //   // Only keep buffers of size m_buffer_capacity in pool of buffers
-    //   if (buffer->size() == m_buffer_capacity) free_buffer(buffer);
-    // }
+      while(step < buffer->size() && *bitr != '\0')
+      {
+        ASSERT_DEBUG(step < buffer->size());
+
+        char* hdr_stream = &(*bitr);
+        header_t* hdr = reinterpret_cast<header_t*>(hdr_stream);
+        //std::cout<<"\n"<<rank()<<" is taking step  : "<<step<<" len: "<<hdr->len<<"\n";
+        
+        char* begin_pack = &(*bitr);
+        char* next_pack = begin_pack + hdr->len + sizeof(header_t); //pack = header + data
+
+        // if (hdr->len + sizeof(header_t) + final_send_buffers[hdr->dst]->size() >
+        //     m_buffer_capacity){
+        //   //async_final_flush(hdr->dst);
+        // }
+
+        //final_send_buffers[hdr->dst]->insert(final_send_buffers[hdr->dst]->end(), begin_pack, (next_pack));
+        std::cout<<"\n"<<rank()<<" Got a msg from "<<hdr->src<<" of size "<<hdr->len<<" bytes\n";
+        step += hdr->len + sizeof(header_t);
+        bitr = &buffer->at(step);
+        
+        //break;
+      }
+      // Only keep buffers of size m_buffer_capacity in pool of buffers
+      if (buffer->size() == m_buffer_capacity) free_buffer(buffer);
+    }
+    
     return received;
   }
 
@@ -948,6 +904,9 @@ std::pair<int, int> find_lr_indices(const int dest){
   int m_comm_remote_size;
   int m_comm_remote_rank;
   size_t m_buffer_capacity;
+  int m_self_buffer_count; 
+
+  
 
   std::vector<std::shared_ptr<std::vector<char>>> m_vec_send_buffers;
   std::vector<std::shared_ptr<std::vector<char>>> intermediate_send_buffers;
