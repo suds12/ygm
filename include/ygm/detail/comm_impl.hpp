@@ -16,7 +16,7 @@
 #include <ygm/detail/mpi.hpp>
 #include <ygm/detail/ygm_cereal_archive.hpp>
 #include <ygm/meta/functional.hpp>
-#define test_buffer_capacity 500 //This is smalljust to test large messages
+#define test_buffer_capacity 50 //This is smalljust to test large messages
 
 namespace ygm {
 
@@ -35,10 +35,10 @@ class comm::impl {
     // Get node/core indices
     init_local_remote_comms();
 
-    // Allocate send buffers
-    for (int i = 0; i < m_comm_size; ++i) {
-      m_vec_send_buffers.push_back(allocate_buffer());
-    }
+    // // Allocate send buffers
+    // for (int i = 0; i < m_comm_size; ++i) {
+    //   m_vec_send_buffers.push_back(allocate_buffer());
+    // }
 
     // Allocate intermediate send buffers
     for (int i = 0; i < m_comm_local_size; ++i) {
@@ -52,7 +52,7 @@ class comm::impl {
 
     // launch listener threads
     m_large_listener = std::thread(&impl::listen_large, this);
-    m_small_listener = std::thread(&impl::listen_small, this);
+    //m_small_listener = std::thread(&impl::listen_small, this);
     m_local_listener = std::thread(&impl::listen_local, this);
     m_remote_listener = std::thread(&impl::listen_remote, this);
 
@@ -62,7 +62,7 @@ class comm::impl {
   ~impl() {
     barrier();
     // send kill signal to self (small listener thread)
-    MPI_Send(NULL, 0, MPI_BYTE, m_comm_rank, 0, m_comm_async);
+    //MPI_Send(NULL, 0, MPI_BYTE, m_comm_rank, 0, m_comm_async);
     // send kill signal to self (large listener thread)
     MPI_Send(NULL, 0, MPI_BYTE, m_comm_rank, 0, m_comm_large_async);
      // send kill signal to self (local listener thread)
@@ -74,7 +74,7 @@ class comm::impl {
     // Join listener threads.
 
     m_large_listener.join();
-    m_small_listener.join();
+    //m_small_listener.join();
     m_local_listener.join();
     m_remote_listener.join();
     // Free cloned communicator.
@@ -107,32 +107,29 @@ class comm::impl {
       m_local_bytes_sent += data.size();
       //if(rank() == 0){std::cout<<data.size()<<"$$"<<m_buffer_capacity<<"\n";}
         
-      if (data.size() < m_buffer_capacity) {
+      if (data.size() + sizeof(header_t) < m_buffer_capacity) {
         // check if buffer doesn't have enough space
-        if (data.size() + m_vec_send_buffers[dest]->size() >
-            m_buffer_capacity) {
-          async_flush(dest);
-        }
+
 //---------------
          //from, remote index(dest), size
         auto header = pack_header(rank(), dest_index.second, data.size());
         header_t* hdr = reinterpret_cast<header_t*>(&header);
         //std::cout<<data.size()<<" ^^ "<<header.size() <<" %% "<< m_buffer_capacity<<"\n";
-        if (data.size() + header.size() < m_buffer_capacity) {
-          // check if buffer doesn't have enough space
-          if (data.size() + header.size() + intermediate_send_buffers[dest_index.first]->size() >
-              m_buffer_capacity - sizeof(char)) {
-            async_inter_flush(dest_index.first);
-          }
+        
+        // check if buffer doesn't have enough space
+        if (data.size() + header.size() + intermediate_send_buffers[dest_index.first]->size() >
+            m_buffer_capacity - sizeof(char)) {
+          async_inter_flush(dest_index.first);
         }
+        
 
         //insert header followed by data to intermediate destination(core offset)
         intermediate_send_buffers[dest_index.first]->insert(intermediate_send_buffers[dest_index.first]->end(), header.begin(), header.end());
         intermediate_send_buffers[dest_index.first]->insert(intermediate_send_buffers[dest_index.first]->end(), data.begin(), data.end());
         
         // add data to the to dest buffer
-        m_vec_send_buffers[dest]->insert(m_vec_send_buffers[dest]->end(),
-                                         data.begin(), data.end());
+        // m_vec_send_buffers[dest]->insert(m_vec_send_buffers[dest]->end(),
+        //                                  data.begin(), data.end());
 
 
 
@@ -141,7 +138,7 @@ class comm::impl {
       }
     }
     // check if listener has queued receives to process
-    if (receive_queue_peek_size() > 0) { receive_queue_process(); }
+    //if (receive_queue_peek_size() > 0) { receive_queue_process(); }
     // check if listener has queued receives to process
     if (transit_queue_peek_size() > 0) { transit_queue_process(); }
     //check if listener has queued receives to process
@@ -194,11 +191,11 @@ class comm::impl {
   // }
 
   void wait_local_idle() {
-    receive_queue_process();
-    do {
-      async_flush_all();
-      std::this_thread::yield();
-    } while (receive_queue_process());
+    //receive_queue_process();
+    // do {
+    //   async_flush_all();
+    //   std::this_thread::yield();
+    // } while (receive_queue_process());
 
     transit_queue_process();
     do {
@@ -219,6 +216,8 @@ class comm::impl {
       MPI_Request req = MPI_REQUEST_NULL;
       int64_t first_all_count{-1};
       int64_t first_local_count = m_send_count - m_recv_count;
+      //The above line makes sure send and recv count add up but I wonder if I should also include send and recv of first hop. I don't think so.
+      // int64_t first_local_count = m_send_count + inter_send_count - inter_recv_count - m_recv_count;
       ASSERT_MPI(MPI_Iallreduce(&first_local_count, &first_all_count, 1,
                                 MPI_INT64_T, MPI_SUM, m_comm_barrier, &req));
 
@@ -490,14 +489,8 @@ class comm::impl {
         receive_large_message(large_recv_buff, src, size);
 
         // Add buffer to receive queue
-        receive_queue_push_back(large_recv_buff, src);
+        arrival_queue_push_back(large_recv_buff, src);
       } else {
-        // int count;
-        // ASSERT_MPI(MPI_Get_count(&status, MPI_BYTE, &count))
-        // // std::cout << "RANK: " << rank() << " received count: " << count
-        // //           << std::endl;
-        // // Resize buffer to cout MPI actually received
-        // recv_buffer->resize(count);
 
         // Check for kill signal
         if (status.MPI_SOURCE == m_comm_rank) {break;}
@@ -505,33 +498,6 @@ class comm::impl {
         // // Add buffer to receive queue
         // receive_queue_push_back(recv_buffer, status.MPI_SOURCE);
 
-      }
-    }
-  }
-
-void listen_small() {
-    while (true) {
-      auto recv_buffer = allocate_buffer();
-      recv_buffer->resize(m_buffer_capacity);  // TODO:  does this clear?
-      MPI_Status status;
-      ASSERT_MPI(MPI_Recv(recv_buffer->data(), m_buffer_capacity, MPI_BYTE,
-                          MPI_ANY_SOURCE, MPI_ANY_TAG, m_comm_async, &status));
-      int tag = status.MPI_TAG;
-
-      if (tag == large_message_announce_tag) { //Nothing todo here
-      } else {
-        int count;
-        ASSERT_MPI(MPI_Get_count(&status, MPI_BYTE, &count))
-        // std::cout << "RANK: " << rank() << " received count: " << count
-        //           << std::endl;
-        // Resize buffer to cout MPI actually received
-        recv_buffer->resize(count);
-
-        // Check for kill signal
-        if (status.MPI_SOURCE == m_comm_rank) break;
-
-        // Add buffer to receive queue
-        receive_queue_push_back(recv_buffer, status.MPI_SOURCE);
       }
     }
   }
@@ -551,7 +517,7 @@ void listen_local() {
       if (status.MPI_SOURCE == m_comm_local_rank) break;
 
       // Add buffer to receive queue
-      transit_queue_push_back(recv_buffer, status.MPI_SOURCE);
+      transit_queue_push_back(recv_buffer, -5);
       
     }
   }
@@ -571,7 +537,7 @@ void listen_local() {
       if (status.MPI_SOURCE == m_comm_remote_rank) break;
 
       // Add buffer to receive queue
-      arrival_queue_push_back(recv_buffer, status.MPI_SOURCE);   
+      arrival_queue_push_back(recv_buffer, -10);   
     }
   }
 
@@ -644,7 +610,7 @@ std::pair<int, int> find_lr_indices(const int dest){
     m_vec_free_buffers.push_back(b);
   }
 
-  size_t receive_queue_peek_size() const { return m_receive_queue.size(); }
+  //size_t receive_queue_peek_size() const { return m_receive_queue.size(); }
   size_t transit_queue_peek_size() const { return m_transit_queue.size(); }
   size_t arrival_queue_peek_size() const { return m_arrival_queue.size(); }
 
@@ -681,17 +647,17 @@ std::pair<int, int> find_lr_indices(const int dest){
     }
   }
 
-  void receive_queue_push_back(std::shared_ptr<std::vector<char>> b, int from) {
-    size_t current_size = 0;
-    {
-      std::scoped_lock lock(m_receive_queue_mutex);
-      m_receive_queue.push_back(std::make_pair(b, from));
-      current_size = m_receive_queue.size();
-    }
-    if (current_size > 16) {
-      std::this_thread::sleep_for(std::chrono::microseconds(current_size - 16));
-    }
-  }
+  // void receive_queue_push_back(std::shared_ptr<std::vector<char>> b, int from) {
+  //   size_t current_size = 0;
+  //   {
+  //     std::scoped_lock lock(m_receive_queue_mutex);
+  //     m_receive_queue.push_back(std::make_pair(b, from));
+  //     current_size = m_receive_queue.size();
+  //   }
+  //   if (current_size > 16) {
+  //     std::this_thread::sleep_for(std::chrono::microseconds(current_size - 16));
+  //   }
+  // }
 
   void transit_queue_push_back(std::shared_ptr<std::vector<char>> b, int from) {
     size_t current_size = 0;
@@ -757,30 +723,30 @@ std::pair<int, int> find_lr_indices(const int dest){
   // this is used to fix address space randomization
   static void reference() {}
 
-  bool receive_queue_process() {
-    bool received = false;
-    while (true) {
-      auto buffer_source = receive_queue_try_pop();
-      auto buffer = buffer_source.first;
-      if (buffer == nullptr) {break;}
-      int from = buffer_source.second;
-      received = true;
-      cereal::YGMInputArchive iarchive(buffer->data(), buffer->size());
-      while (!iarchive.empty()) {
-        int64_t iptr;
-        iarchive(iptr);
-        iptr += (int64_t)&reference;
-        // void (*fun_ptr)(impl *, int, cereal::YGMInputArchive &);
-        // memcpy(&fun_ptr, &iptr, sizeof(uint64_t));
-        // fun_ptr(this, from, iarchive);
-        m_recv_count++;
-      }
+  // bool receive_queue_process() {
+  //   bool received = false;
+  //   while (true) {
+  //     auto buffer_source = receive_queue_try_pop();
+  //     auto buffer = buffer_source.first;
+  //     if (buffer == nullptr) {break;}
+  //     int from = buffer_source.second;
+  //     received = true;
+  //     cereal::YGMInputArchive iarchive(buffer->data(), buffer->size());
+  //     while (!iarchive.empty()) {
+  //       int64_t iptr;
+  //       iarchive(iptr);
+  //       iptr += (int64_t)&reference;
+  //       void (*fun_ptr)(impl *, int, cereal::YGMInputArchive &);
+  //       memcpy(&fun_ptr, &iptr, sizeof(uint64_t));
+  //       fun_ptr(this, from, iarchive);
+  //       m_recv_count++;
+  //     }
 
-      // Only keep buffers of size m_buffer_capacity in pool of buffers
-      if (buffer->size() == m_buffer_capacity) free_buffer(buffer);
-    }
-    return received;
-  }
+  //     // Only keep buffers of size m_buffer_capacity in pool of buffers
+  //     if (buffer->size() == m_buffer_capacity) free_buffer(buffer);
+  //   }
+  //   return received;
+  // }
 
     bool transit_queue_process() {
     bool received = false;
@@ -836,47 +802,69 @@ std::pair<int, int> find_lr_indices(const int dest){
       int from = buffer_source.second;
       received = true;
       char* bitr = &buffer->at(0);
+      int buffer_size = buffer->size();
       int step = 0;
 
-      std::cout<<"\n buffer_size_arrival : "<<rank()<<" ____"<<buffer->size()<<"\n";
+      //std::cout<<"\n buffer_size_arrival : "<<rank()<<" ____"<<buffer->size()<<"\n";
 
-      while(step < buffer->size() && *bitr != '\0')
+      if(from >= 0)
       {
-        ASSERT_DEBUG(step < buffer->size());
-
-        char* hdr_stream = &(*bitr);
-        header_t* hdr = reinterpret_cast<header_t*>(hdr_stream);
-        //std::cout<<"\n"<<rank()<<" is taking step  : "<<step<<" len: "<<hdr->len<<"\n";
-        
-        char* begin_pack = &(*bitr);
-        char* begin_msg = &(*bitr) + sizeof(header_t);
-        char* next_pack = begin_pack + hdr->len + sizeof(header_t); //pack = header + data
-        cereal::YGMInputArchive iarchive(begin_msg, hdr->len);
-        int64_t iptr;
-        iarchive(iptr);
-
-        iptr += (int64_t)&reference;
-        void (*fun_ptr)(impl *, int, cereal::YGMInputArchive &);
-        memcpy(&fun_ptr, &iptr, sizeof(uint64_t));
-        fun_ptr(this, hdr->src, iarchive);
-        m_recv_count++;
-        // if (hdr->len + sizeof(header_t) + final_send_buffers[hdr->dst]->size() >
-        //     m_buffer_capacity){
-        //   //async_final_flush(hdr->dst);
-        // }
-
-        //final_send_buffers[hdr->dst]->insert(final_send_buffers[hdr->dst]->end(), begin_pack, (next_pack));
-        //std::cout<<"\n"<<rank()<<" Got a msg from "<<hdr->src<<" of size "<<hdr->len<<" bytes\n";
-        step += hdr->len + sizeof(header_t);
-        bitr = &buffer->at(step);
-        
-        //break;
+        process_large_buffer(bitr, from, buffer_size);
       }
+      else{
+        while(step < buffer->size() && *bitr != '\0')
+        {
+          ASSERT_DEBUG(step < buffer->size());
+
+          char* hdr_stream = &(*bitr);
+          header_t* hdr = reinterpret_cast<header_t*>(hdr_stream);
+          //std::cout<<"\n"<<rank()<<" is taking step  : "<<step<<" len: "<<hdr->len<<"\n";
+          
+          char* begin_pack = &(*bitr);
+          char* begin_msg = &(*bitr) + sizeof(header_t);
+          char* next_pack = begin_pack + hdr->len + sizeof(header_t); //pack = header + data
+          cereal::YGMInputArchive iarchive(begin_msg, hdr->len);
+          int64_t iptr;
+          iarchive(iptr);
+
+          iptr += (int64_t)&reference;
+          void (*fun_ptr)(impl *, int, cereal::YGMInputArchive &);
+          memcpy(&fun_ptr, &iptr, sizeof(uint64_t));
+          fun_ptr(this, hdr->src, iarchive);
+          //m_recv_count++;
+          // if (hdr->len + sizeof(header_t) + final_send_buffers[hdr->dst]->size() >
+          //     m_buffer_capacity){
+          //   //async_final_flush(hdr->dst);
+          // }
+
+          //final_send_buffers[hdr->dst]->insert(final_send_buffers[hdr->dst]->end(), begin_pack, (next_pack));
+          //std::cout<<"\n"<<rank()<<" Got a msg from "<<hdr->src<<" of size "<<hdr->len<<" bytes\n";
+          step += hdr->len + sizeof(header_t);
+          bitr = &buffer->at(step);
+          m_recv_count++;
+          
+          //break;
+        }
+
+      }
+
       // Only keep buffers of size m_buffer_capacity in pool of buffers
       if (buffer->size() == m_buffer_capacity) free_buffer(buffer);
     }
     
     return received;
+  }
+  void process_large_buffer(char* bitr, int from, int buffer_size){
+    cereal::YGMInputArchive iarchive(bitr, buffer_size);
+    while (!iarchive.empty()) {
+      int64_t iptr;
+      iarchive(iptr);
+      iptr += (int64_t)&reference;
+      void (*fun_ptr)(impl *, int, cereal::YGMInputArchive &);
+      memcpy(&fun_ptr, &iptr, sizeof(uint64_t));
+      fun_ptr(this, from, iarchive);
+      m_recv_count++;
+    }
   }
 
 
@@ -934,7 +922,7 @@ std::pair<int, int> find_lr_indices(const int dest){
   std::mutex m_arrival_queue_mutex;
 
   std::thread m_large_listener;
-  std::thread m_small_listener;
+  //std::thread m_small_listener;
   std::thread m_local_listener;
   std::thread m_remote_listener;
 
