@@ -47,7 +47,7 @@ int main(int argc, char **argv) {
   if (world.rank() == 4) {
     world.async(1, howdy, small_message1);
     world.async(3, howdy, small_message3);
-    world.async(4, howdy, small_message4);
+    world.async(5, howdy, small_message4);
     world.async(2, howdy, small_message5);
     world.async(2, howdy, small_message6);
   }

@@ -36,12 +36,12 @@ public:
     init_local_remote_comms();
 
     // Allocate intermediate send buffers
-    for (int i = 0; i < m_comm_local_size; ++i) {
+    for (int i = 0; i < m_comm_remote_size; ++i) {
       intermediate_send_buffers.push_back(allocate_buffer());
     }
 
     // Allocate final send buffers
-    for (int i = 0; i < m_comm_remote_size; ++i) {
+    for (int i = 0; i < m_comm_local_size; ++i) {
       final_send_buffers.push_back(allocate_buffer());
     }
 
@@ -95,21 +95,21 @@ public:
 
       if (data.size() + sizeof(header_t) < m_buffer_capacity) {
         // check if buffer doesn't have enough space
-        auto header = pack_header(rank(), dest_index.second, data.size());
+        auto header = pack_header(rank(), dest_index.first, data.size());
         header_t *hdr = reinterpret_cast<header_t *>(&header);
         // check if buffer doesn't have enough space
         if (data.size() + header.size() +
-                intermediate_send_buffers[dest_index.first]->size() >
+                intermediate_send_buffers[dest_index.second]->size() >
             m_buffer_capacity - sizeof(char)) {
-          async_inter_flush(dest_index.first);
+          async_inter_flush(dest_index.second);
         }
         // insert header followed by data to intermediate destination(core
         // offset)
-        intermediate_send_buffers[dest_index.first]->insert(
-            intermediate_send_buffers[dest_index.first]->end(), header.begin(),
+        intermediate_send_buffers[dest_index.second]->insert(
+            intermediate_send_buffers[dest_index.second]->end(), header.begin(),
             header.end());
-        intermediate_send_buffers[dest_index.first]->insert(
-            intermediate_send_buffers[dest_index.first]->end(), data.begin(),
+        intermediate_send_buffers[dest_index.second]->insert(
+            intermediate_send_buffers[dest_index.second]->end(), data.begin(),
             data.end());
 
       } else { // Large message
@@ -261,7 +261,7 @@ public:
   }
 
   void async_inter_flush(int index) {
-    if (index != m_comm_local_rank) {
+    if (index != m_comm_remote_rank) {
       if (intermediate_send_buffers[index]->size() == 0)
         return;
       auto buffer = allocate_buffer();
@@ -274,7 +274,7 @@ public:
   }
 
   void async_final_flush(int index) {
-    if (index != m_comm_remote_rank) {
+    if (index != m_comm_local_rank) {
       if (final_send_buffers[index]->size() == 0)
         return;
       auto buffer = allocate_buffer();
@@ -283,8 +283,8 @@ public:
       ASSERT_MPI(MPI_Send(buffer->data(), buffer->size(), MPI_BYTE, index, 0,
                           m_comm_remote));
       free_buffer(buffer);
-    } else { // For local messages, we copy the buffer and add it to the arrival
-             // queue
+    } else { // For terminal messages, we copy the buffer and add it to the
+             // arrival queue
       if (final_send_buffers[index]->size() == 0)
         return;
       auto buffer = allocate_buffer();
@@ -306,16 +306,16 @@ public:
   }
 
   void async_inter_flush_all() {
-    for (int i = 0; i < local_size(); ++i) {
-      int dest = (local_rank() + i) % local_size();
+    for (int i = 0; i < remote_size(); ++i) {
+      int dest = (remote_rank() + i) % remote_size();
       async_inter_flush(dest);
     }
     // TODO async_flush_bcast(); goes here
   }
 
   void async_final_flush_all() {
-    for (int i = 0; i < remote_size(); ++i) {
-      int dest = (remote_rank() + i) % remote_size();
+    for (int i = 0; i < local_size(); ++i) {
+      int dest = (local_rank() + i) % local_size();
       async_final_flush(dest);
     }
     // TODO async_flush_bcast(); goes here
@@ -479,7 +479,7 @@ private:
       if (status.MPI_SOURCE == m_comm_local_rank)
         break;
       // Add buffer to receive queue
-      transit_queue_push_back(recv_buffer, -5);
+      arrival_queue_push_back(recv_buffer, -10);
     }
   }
 
@@ -499,7 +499,7 @@ private:
         break;
 
       // Add buffer to receive queue
-      arrival_queue_push_back(recv_buffer, -10);
+      transit_queue_push_back(recv_buffer, -5);
     }
   }
 
@@ -763,8 +763,8 @@ private:
       void (*fun_ptr)(impl *, int, cereal::YGMInputArchive &);
       memcpy(&fun_ptr, &iptr, sizeof(uint64_t));
       fun_ptr(this, from, iarchive);
+      m_recv_count++;
     }
-    m_recv_count++;
   }
 
   inline void init_local_remote_comms() {
