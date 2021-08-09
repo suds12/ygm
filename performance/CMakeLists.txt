@@ -37,5 +37,5 @@ function ( add_mpi_omp_example example_name )
   include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 endfunction()
 
-#add_mpi_omp_example(counter_scaling_test)
+add_mpi_omp_example(counter_scaling_test)
 add_mpi_omp_example(simple_perf)

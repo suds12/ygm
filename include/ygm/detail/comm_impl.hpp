@@ -16,7 +16,8 @@
 #include <ygm/detail/mpi.hpp>
 #include <ygm/detail/ygm_cereal_archive.hpp>
 #include <ygm/meta/functional.hpp>
-#define test_buffer_capacity 16 * 1024
+//#define test_buffer_capacity 16 * 1024
+#define test_buffer_capacity 100
 
 namespace ygm {
 
@@ -183,6 +184,10 @@ public:
         async_final_flush_all();
         final_send_buffers_mutex.unlock();
       }
+      // {
+      //   std::scoped_lock lock(final_send_buffers_mutex);
+      //   async_final_flush_all();
+      // }
       std::this_thread::yield();
     } while (arrival_queue_process());
   }
@@ -271,7 +276,8 @@ public:
       if (intermediate_send_buffers[index]->size() == 0)
         return;
       auto buffer = allocate_buffer();
-      intermediate_send_buffers[index]->push_back(0); // Nullterminating buffer
+      intermediate_send_buffers[index]->push_back(
+          '\0'); // Nullterminating buffer
       std::swap(buffer, intermediate_send_buffers[index]);
       ASSERT_MPI(MPI_Send(buffer->data(), buffer->size(), MPI_BYTE, index, 0,
                           m_comm_remote));
@@ -284,7 +290,7 @@ public:
       if (final_send_buffers[index]->size() == 0)
         return;
       auto buffer = allocate_buffer();
-      final_send_buffers[index]->push_back(0); // Nullterminating buffer
+      final_send_buffers[index]->push_back('\0'); // Nullterminating buffer
       std::swap(buffer, final_send_buffers[index]);
       ASSERT_MPI(MPI_Send(buffer->data(), buffer->size(), MPI_BYTE, index, 0,
                           m_comm_local));
@@ -295,7 +301,7 @@ public:
       if (final_send_buffers[index]->size() == 0)
         return;
       auto buffer = allocate_buffer();
-      final_send_buffers[index]->push_back(0); // Nullterminating buffer
+      final_send_buffers[index]->push_back('\0'); // Nullterminating buffer
       std::swap(buffer, final_send_buffers[index]);
       arrival_queue_push_back(buffer, -2); //-2 indicates terminal message
     }
@@ -311,7 +317,8 @@ public:
 
   void async_inter_flush_all() {
     for (int i = 0; i < remote_size(); ++i) {
-      int dest = (remote_size() + i) % remote_size();
+      // int dest = (remote_size() + i) % remote_size();
+      int dest = i;
       async_inter_flush(dest);
     }
     // TODO async_flush_bcast(); goes here
@@ -319,7 +326,8 @@ public:
 
   void async_final_flush_all() {
     for (int i = 0; i < local_size(); ++i) {
-      int dest = (local_size() + i) % local_size();
+      // int dest = (local_size() + i) % local_size();
+      int dest = i;
       async_final_flush(dest);
     }
     // TODO async_flush_bcast(); goes here
@@ -486,6 +494,7 @@ private:
       // Add buffer to receive queue
       // transit_queue_push_back(recv_buffer, -5);
       char *bitr = &recv_buffer->at(0);
+
       transit_buffer_process(bitr, count);
     }
   }
@@ -716,59 +725,60 @@ private:
   //   return received;
   // }
 
-  bool transit_queue_process() {
-    bool received = false;
-    while (true) {
-      auto buffer_source = transit_queue_try_pop();
-      auto buffer = buffer_source.first;
-      if (buffer == nullptr) {
-        break;
-      }
-      int step = 0;
-      int from = buffer_source.second;
-      received = true;
-      char *bitr = &buffer->at(0);
+  // bool transit_queue_process() {
+  //   bool received = false;
+  //   while (true) {
+  //     auto buffer_source = transit_queue_try_pop();
+  //     auto buffer = buffer_source.first;
+  //     if (buffer == nullptr) {
+  //       break;
+  //     }
+  //     int step = 0;
+  //     int from = buffer_source.second;
+  //     received = true;
+  //     char *bitr = &buffer->at(0);
 
-      // std::cout<<"\n buffer_size_after : "<<rank()<<"
-      // ____"<<buffer->size()<<"\n";
+  //     // std::cout<<"\n buffer_size_after : "<<rank()<<"
+  //     // ____"<<buffer->size()<<"\n";
 
-      while (step < buffer->size() && *bitr != '\0') {
-        ASSERT_DEBUG(step < buffer->size());
+  //     while (step < buffer->size() && *bitr != '\0') {
+  //       ASSERT_DEBUG(step < buffer->size());
 
-        char *hdr_stream = &(*bitr);
-        header_t *hdr = reinterpret_cast<header_t *>(hdr_stream);
-        // std::cout<<"\n"<<rank()<<" is taking step  : "<<step<<" len:
-        // "<<hdr->len<<"\n";
+  //       char *hdr_stream = &(*bitr);
+  //       header_t *hdr = reinterpret_cast<header_t *>(hdr_stream);
+  //       // std::cout<<"\n"<<rank()<<" is taking step  : "<<step<<" len:
+  //       // "<<hdr->len<<"\n";
 
-        char *begin_pack = &(*bitr);
-        char *next_pack =
-            begin_pack + hdr->len + sizeof(header_t); // pack = header + data
+  //       char *begin_pack = &(*bitr);
+  //       char *next_pack =
+  //           begin_pack + hdr->len + sizeof(header_t); // pack = header + data
 
-        if (hdr->len + sizeof(header_t) + final_send_buffers[hdr->dst]->size() >
-            m_buffer_capacity - sizeof(char)) {
-          async_final_flush(hdr->dst);
-        }
+  //       if (hdr->len + sizeof(header_t) +
+  //       final_send_buffers[hdr->dst]->size() >
+  //           m_buffer_capacity - sizeof(char)) {
+  //         async_final_flush(hdr->dst);
+  //       }
 
-        final_send_buffers[hdr->dst]->insert(
-            final_send_buffers[hdr->dst]->end(), begin_pack, (next_pack));
-        // std::cout<<"\n"<<"memcpy to "<<hdr->src<<" : "<<hdr->len<<" bytes\n";
-        step += hdr->len + sizeof(header_t);
-        bitr = &buffer->at(step);
+  //       final_send_buffers[hdr->dst]->insert(
+  //           final_send_buffers[hdr->dst]->end(), begin_pack, (next_pack));
+  //       // std::cout<<"\n"<<"memcpy to "<<hdr->src<<" : "<<hdr->len<<"
+  //       bytes\n"; step += hdr->len + sizeof(header_t); bitr =
+  //       &buffer->at(step);
 
-        // break;
-      }
-      // Only keep buffers of size m_buffer_capacity in pool of buffers
-      if (buffer->size() == m_buffer_capacity)
-        free_buffer(buffer);
-    }
-    return received;
-  }
+  //       // break;
+  //     }
+  //     // Only keep buffers of size m_buffer_capacity in pool of buffers
+  //     if (buffer->size() == m_buffer_capacity)
+  //       free_buffer(buffer);
+  //   }
+  //   return received;
+  // }
 
   void transit_buffer_process(char *bitr, int buffer_size) {
     int step = 0;
     {
       std::scoped_lock lock(final_send_buffers_mutex);
-      while (step < buffer_size && *bitr != '\0') {
+      while (step != buffer_size - 1) {
         ASSERT_DEBUG(step < buffer_size);
 
         char *hdr_stream = &(*bitr);
@@ -815,7 +825,7 @@ private:
       if (from >= 0) {
         process_large_buffer(bitr, from, buffer_size);
       } else {
-        while (step < buffer->size() && *bitr != '\0') {
+        while (step != buffer->size() - 1) {
           ASSERT_DEBUG(step < buffer->size());
 
           char *hdr_stream = &(*bitr);
@@ -835,16 +845,6 @@ private:
           void (*fun_ptr)(impl *, int, cereal::YGMInputArchive &);
           memcpy(&fun_ptr, &iptr, sizeof(uint64_t));
           fun_ptr(this, hdr->src, iarchive);
-          // m_recv_count++;
-          // if (hdr->len + sizeof(header_t) +
-          // final_send_buffers[hdr->dst]->size() >
-          //     m_buffer_capacity){
-          //   //async_final_flush(hdr->dst);
-          // }
-
-          // final_send_buffers[hdr->dst]->insert(final_send_buffers[hdr->dst]->end(),
-          // begin_pack, (next_pack)); std::cout<<"\n"<<rank()<<" Got a msg from
-          // "<<hdr->src<<" of size "<<hdr->len<<" bytes\n";
           step += hdr->len + sizeof(header_t);
           bitr = &buffer->at(step);
           m_recv_count++;
