@@ -55,11 +55,14 @@ public:
   ~impl() {
     barrier();
     // send kill signal to self (large listener thread)
-    MPI_Send(NULL, 0, MPI_BYTE, m_comm_rank, 0, m_comm_large_async);
+    MPI_Send(NULL, 0, MPI_BYTE, m_comm_rank, kill_message_tag,
+             m_comm_large_async);
     // send kill signal to self (local listener thread)
-    MPI_Send(NULL, 0, MPI_BYTE, m_comm_local_rank, 0, m_comm_local);
+    MPI_Send(NULL, 0, MPI_BYTE, m_comm_local_rank, kill_message_tag,
+             m_comm_local);
     // send kill signal to self (remote listener thread)
-    MPI_Send(NULL, 0, MPI_BYTE, m_comm_remote_rank, 0, m_comm_remote);
+    MPI_Send(NULL, 0, MPI_BYTE, m_comm_remote_rank, kill_message_tag,
+             m_comm_remote);
 
     // Join listener threads.
     m_large_listener.join();
@@ -457,7 +460,8 @@ private:
       MPI_Status status;
       ASSERT_MPI(
           MPI_Probe(MPI_ANY_SOURCE, MPI_ANY_TAG, m_comm_large_async, &status));
-      if (status.MPI_SOURCE == m_comm_rank) {
+      // Kill message
+      if (status.MPI_TAG == kill_message_tag) {
         ASSERT_MPI(MPI_Recv(NULL, 0, MPI_BYTE, status.MPI_SOURCE, MPI_ANY_TAG,
                             m_comm_large_async, MPI_STATUS_IGNORE));
         break;
@@ -488,7 +492,7 @@ private:
       ASSERT_MPI(MPI_Get_count(&status, MPI_BYTE, &count))
       recv_buffer->resize(count);
       // Check for kill signal
-      if (status.MPI_SOURCE == m_comm_remote_rank)
+      if (status.MPI_TAG == kill_message_tag)
         break;
 
       // Add buffer to receive queue
@@ -511,7 +515,7 @@ private:
       ASSERT_MPI(MPI_Get_count(&status, MPI_BYTE, &count))
       recv_buffer->resize(count);
       // Check for kill signal
-      if (status.MPI_SOURCE == m_comm_local_rank)
+      if (status.MPI_TAG == kill_message_tag)
         break;
       // Add buffer to receive queue
       arrival_queue_push_back(recv_buffer, -10);
@@ -854,7 +858,7 @@ private:
       }
 
       // Only keep buffers of size m_buffer_capacity in pool of buffers
-      if (buffer->size() == m_buffer_capacity)
+      if (buffer->capacity() == m_buffer_capacity)
         free_buffer(buffer);
     }
 
@@ -932,6 +936,7 @@ private:
 
   int large_message_announce_tag = 32766;
   int large_message_tag = 32767;
+  int kill_message_tag = 32768;
 };
 
 inline comm::comm(int *argc, char ***argv,
