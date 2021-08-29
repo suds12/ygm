@@ -16,8 +16,8 @@
 #include <ygm/detail/mpi.hpp>
 #include <ygm/detail/ygm_cereal_archive.hpp>
 #include <ygm/meta/functional.hpp>
-//#define test_buffer_capacity 16 * 1024
-#define test_buffer_capacity 100
+#define test_buffer_capacity 16 * 1024
+//#define test_buffer_capacity 100
 
 namespace ygm {
 
@@ -100,35 +100,19 @@ public:
       if (data.size() + sizeof(header_t) < m_buffer_capacity) {
         auto header = pack_header(rank(), dest_index.first, data.size());
 
-        if (dest_index.second == m_comm_remote_rank) { // local destination
-          std::scoped_lock lock(final_send_buffers_mutex);
-          if (data.size() + header.size() +
-                  final_send_buffers[dest_index.first]->size() >
-              m_buffer_capacity - sizeof(char)) {
-            async_final_flush(dest_index.first);
-          }
-          // insert header followed by data to directly to final destination
-          final_send_buffers[dest_index.first]->insert(
-              final_send_buffers[dest_index.first]->end(), header.begin(),
-              header.end());
-          final_send_buffers[dest_index.first]->insert(
-              final_send_buffers[dest_index.first]->end(), data.begin(),
-              data.end());
-        } else { // remote destination
-          if (data.size() + header.size() +
-                  intermediate_send_buffers[dest_index.second]->size() >
-              m_buffer_capacity - sizeof(char)) {
-            async_inter_flush(dest_index.second);
-          }
-          // insert header followed by data to intermediate destination(node
-          // offset)
-          intermediate_send_buffers[dest_index.second]->insert(
-              intermediate_send_buffers[dest_index.second]->end(),
-              header.begin(), header.end());
-          intermediate_send_buffers[dest_index.second]->insert(
-              intermediate_send_buffers[dest_index.second]->end(), data.begin(),
-              data.end());
+        if (data.size() + header.size() +
+                intermediate_send_buffers[dest_index.second]->size() >
+            m_buffer_capacity - sizeof(char)) {
+          async_inter_flush(dest_index.second);
         }
+        // insert header followed by data to intermediate destination(node
+        // offset)
+        intermediate_send_buffers[dest_index.second]->insert(
+            intermediate_send_buffers[dest_index.second]->end(), header.begin(),
+            header.end());
+        intermediate_send_buffers[dest_index.second]->insert(
+            intermediate_send_buffers[dest_index.second]->end(), data.begin(),
+            data.end());
 
       } else { // Large message
         send_large_message(data, dest);
@@ -275,17 +259,14 @@ public:
   }
 
   void async_inter_flush(int index) {
-    if (index != m_comm_remote_rank) {
-      if (intermediate_send_buffers[index]->size() == 0)
-        return;
-      auto buffer = allocate_buffer();
-      intermediate_send_buffers[index]->push_back(
-          '\0'); // Nullterminating buffer
-      std::swap(buffer, intermediate_send_buffers[index]);
-      ASSERT_MPI(MPI_Send(buffer->data(), buffer->size(), MPI_BYTE, index, 0,
-                          m_comm_remote));
-      free_buffer(buffer);
-    }
+    if (intermediate_send_buffers[index]->size() == 0)
+      return;
+    auto buffer = allocate_buffer();
+    intermediate_send_buffers[index]->push_back('\0'); // Nullterminating buffer
+    std::swap(buffer, intermediate_send_buffers[index]);
+    ASSERT_MPI(MPI_Send(buffer->data(), buffer->size(), MPI_BYTE, index, 0,
+                        m_comm_remote));
+    free_buffer(buffer);
   }
 
   void async_final_flush(int index) {
