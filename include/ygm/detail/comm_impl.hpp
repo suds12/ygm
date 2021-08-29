@@ -167,10 +167,9 @@ public:
     arrival_queue_process();
     do {
       async_inter_flush_all();
-      if (final_send_buffers_mutex.try_lock()) {
-        async_final_flush_all();
-        final_send_buffers_mutex.unlock();
-      }
+      async_final_flush_all();
+      // final_send_buffers_mutex.unlock();
+
       // {
       //   std::scoped_lock lock(final_send_buffers_mutex);
       //   async_final_flush_all();
@@ -312,7 +311,10 @@ public:
     for (int i = 0; i < local_size(); ++i) {
       // int dest = (local_size() + i) % local_size();
       int dest = i;
-      async_final_flush(dest);
+      if (final_send_buffers_mutex.try_lock()) {
+        async_final_flush(dest);
+        final_send_buffers_mutex.unlock();
+      }
     }
     // TODO async_flush_bcast(); goes here
   }
