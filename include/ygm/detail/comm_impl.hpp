@@ -16,8 +16,8 @@
 #include <ygm/detail/mpi.hpp>
 #include <ygm/detail/ygm_cereal_archive.hpp>
 #include <ygm/meta/functional.hpp>
-#define test_buffer_capacity 16 * 1024
-//#define test_buffer_capacity 100
+#define test_buffer_capacity 256 * 1024
+//#define test_buffer_capacity 1048576
 
 namespace ygm {
 
