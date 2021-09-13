@@ -16,7 +16,7 @@
 #include <ygm/detail/mpi.hpp>
 #include <ygm/detail/ygm_cereal_archive.hpp>
 #include <ygm/meta/functional.hpp>
-#define test_buffer_capacity 256 * 1024
+#define test_buffer_capacity 1024 * 1024
 //#define test_buffer_capacity 1048576
 
 namespace ygm {
@@ -118,6 +118,11 @@ public:
         send_large_message(data, dest);
       }
     }
+
+    // check if intermediate listener has queued transits to process
+    if (transit_queue_peek_size() > 0) {
+      transit_queue_process();
+    }
     // check if final listener has queued arrivals to process
     if (arrival_queue_peek_size() > 0) {
       arrival_queue_process();
@@ -163,17 +168,31 @@ public:
   //   }
   // }
 
+  // void wait_local_idle() {
+  //   arrival_queue_process();
+  //   do {
+  //     async_inter_flush_all();
+  //     async_final_flush_all();
+  //     // final_send_buffers_mutex.unlock();
+
+  //     // {
+  //     //   std::scoped_lock lock(final_send_buffers_mutex);
+  //     //   async_final_flush_all();
+  //     // }
+  //     std::this_thread::yield();
+  //   } while (arrival_queue_process());
+  // }
+
   void wait_local_idle() {
-    arrival_queue_process();
+    transit_queue_process();
     do {
       async_inter_flush_all();
-      async_final_flush_all();
-      // final_send_buffers_mutex.unlock();
+      std::this_thread::yield();
+    } while (transit_queue_process());
 
-      // {
-      //   std::scoped_lock lock(final_send_buffers_mutex);
-      //   async_final_flush_all();
-      // }
+    arrival_queue_process();
+    do {
+      async_final_flush_all();
       std::this_thread::yield();
     } while (arrival_queue_process());
   }
@@ -311,10 +330,7 @@ public:
     for (int i = 0; i < local_size(); ++i) {
       // int dest = (local_size() + i) % local_size();
       int dest = i;
-      if (final_send_buffers_mutex.try_lock()) {
-        async_final_flush(dest);
-        final_send_buffers_mutex.unlock();
-      }
+      async_final_flush(dest);
     }
     // TODO async_flush_bcast(); goes here
   }
@@ -482,7 +498,8 @@ private:
       // transit_queue_push_back(recv_buffer, -5);
       char *bitr = &recv_buffer->at(0);
 
-      transit_buffer_process(bitr, count);
+      // transit_buffer_process(bitr, count);
+      transit_queue_push_back(recv_buffer, -8);
     }
   }
 
@@ -712,54 +729,52 @@ private:
   //   return received;
   // }
 
-  // bool transit_queue_process() {
-  //   bool received = false;
-  //   while (true) {
-  //     auto buffer_source = transit_queue_try_pop();
-  //     auto buffer = buffer_source.first;
-  //     if (buffer == nullptr) {
-  //       break;
-  //     }
-  //     int step = 0;
-  //     int from = buffer_source.second;
-  //     received = true;
-  //     char *bitr = &buffer->at(0);
+  bool transit_queue_process() {
+    bool received = false;
+    while (true) {
+      auto buffer_source = transit_queue_try_pop();
+      auto buffer = buffer_source.first;
+      if (buffer == nullptr) {
+        break;
+      }
+      int step = 0;
+      int from = buffer_source.second;
+      received = true;
+      char *bitr = &buffer->at(0);
 
-  //     // std::cout<<"\n buffer_size_after : "<<rank()<<"
-  //     // ____"<<buffer->size()<<"\n";
+      // std::cout<<"\n buffer_size_after : "<<rank()<<"
+      // ____"<<buffer->size()<<"\n";
 
-  //     while (step < buffer->size() && *bitr != '\0') {
-  //       ASSERT_DEBUG(step < buffer->size());
+      while (step != buffer->size() - 1) {
+        ASSERT_DEBUG(step < buffer->size() - 1);
 
-  //       char *hdr_stream = &(*bitr);
-  //       header_t *hdr = reinterpret_cast<header_t *>(hdr_stream);
-  //       // std::cout<<"\n"<<rank()<<" is taking step  : "<<step<<" len:
-  //       // "<<hdr->len<<"\n";
+        char *hdr_stream = &(*bitr);
+        header_t *hdr = reinterpret_cast<header_t *>(hdr_stream);
+        // std::cout<<"\n"<<rank()<<" is taking step  : "<<step<<" len:
+        // "<<hdr->len<<"\n";
 
-  //       char *begin_pack = &(*bitr);
-  //       char *next_pack =
-  //           begin_pack + hdr->len + sizeof(header_t); // pack = header + data
+        char *begin_pack = &(*bitr);
+        char *next_pack =
+            begin_pack + hdr->len + sizeof(header_t); // pack = header + data
 
-  //       if (hdr->len + sizeof(header_t) +
-  //       final_send_buffers[hdr->dst]->size() >
-  //           m_buffer_capacity - sizeof(char)) {
-  //         async_final_flush(hdr->dst);
-  //       }
+        if (hdr->len + sizeof(header_t) + final_send_buffers[hdr->dst]->size() >
+            m_buffer_capacity - sizeof(char)) {
+          async_final_flush(hdr->dst);
+        }
 
-  //       final_send_buffers[hdr->dst]->insert(
-  //           final_send_buffers[hdr->dst]->end(), begin_pack, (next_pack));
-  //       // std::cout<<"\n"<<"memcpy to "<<hdr->src<<" : "<<hdr->len<<"
-  //       bytes\n"; step += hdr->len + sizeof(header_t); bitr =
-  //       &buffer->at(step);
+        final_send_buffers[hdr->dst]->insert(
+            final_send_buffers[hdr->dst]->end(), begin_pack, (next_pack));
 
-  //       // break;
-  //     }
-  //     // Only keep buffers of size m_buffer_capacity in pool of buffers
-  //     if (buffer->size() == m_buffer_capacity)
-  //       free_buffer(buffer);
-  //   }
-  //   return received;
-  // }
+        // std::cout<<"\n"<<"memcpy to "<<hdr->src<<" : "<<hdr->len<<" bytes\n";
+        step += hdr->len + sizeof(header_t);
+        bitr += hdr->len + sizeof(header_t);
+      }
+      // Only keep buffers of size m_buffer_capacity in pool of buffers
+      if (buffer->capacity() == m_buffer_capacity)
+        free_buffer(buffer);
+    }
+    return received;
+  }
 
   void transit_buffer_process(char *bitr, int buffer_size) {
     int step = 0;
