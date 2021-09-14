@@ -46,6 +46,9 @@ public:
       final_send_buffers.push_back(allocate_buffer());
     }
 
+    if (rank() == 0) {
+      std::cout << "\nYGM buffer capacity = " << m_buffer_capacity << "\n";
+    }
     // launch listener threads
     m_large_listener = std::thread(&impl::listen_large, this);
     m_local_listener = std::thread(&impl::listen_local, this);
