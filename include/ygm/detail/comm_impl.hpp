@@ -6,6 +6,7 @@
 #pragma once
 
 #include <atomic>
+#include <bits/stdc++.h>
 #include <charconv>
 #include <deque>
 #include <memory>
@@ -16,6 +17,8 @@
 #include <ygm/detail/mpi.hpp>
 #include <ygm/detail/ygm_cereal_archive.hpp>
 #include <ygm/meta/functional.hpp>
+#define NCORES 24
+#define NNODES 3
 #define test_buffer_capacity 1024 * 1024
 //#define test_buffer_capacity 1048576
 
@@ -44,6 +47,11 @@ public:
     // Allocate final send buffers
     for (int i = 0; i < m_comm_local_size; ++i) {
       final_send_buffers.push_back(allocate_buffer());
+    }
+    // Initialize dest_matrix for collectives
+    for (int i = 0; i < NNODES; i++) {
+      std::vector<bool> temp(NCORES, 0);
+      dest_matrix.push_back(temp);
     }
 
     // launch listener threads
@@ -128,8 +136,34 @@ public:
       arrival_queue_process();
     }
   }
+  //************
+  template <typename... SendArgs>
+  void async_mcast(std::vector<int> dest_list, const SendArgs &...args) {
+    for (int dest : dest_list) {
+      ASSERT_DEBUG(dest < m_comm_size);
+      if (dest == m_comm_rank) {
+        local_receive(std::forward<const SendArgs>(args)...);
+      } else {
+        // m_send_count++;
+        auto dest_index = find_lr_indices(dest);
+        node_list.insert(dest_index.second);
+        dest_matrix[dest_index.second][dest_index.first] = true;
+      }
+    }
+    for (int dest_node : node_list) {
+      auto header = pack_mcast_header(rank(), dest_matrix[dest_node], 10);
+    }
+  }
 
   // Will move this somewhere cleaner.
+
+  struct header_mcast_t {
+    bool mcast : 8;
+    uint64_t src : 16;
+    std::bitset<NCORES> dst;
+    uint64_t len : 32;
+  };
+
   struct header_t {
     uint64_t src : 16;
     uint64_t dst : 16;
@@ -138,12 +172,27 @@ public:
 
   std::vector<char> pack_header(int src, int dest, int data_size) {
     /*Probably there is a more efficient way to do this*/
-
     header_t hdr_struct{(uint64_t)src, (uint64_t)dest, (uint64_t)data_size};
 
     auto ptr = reinterpret_cast<const char *>(&hdr_struct);
     auto hdr = std::vector<char>(ptr, ptr + sizeof(header_t));
-    // std::cout << "\npacking " << hdr_struct.len << " for " << hdr_struct.dst;
+
+    return hdr;
+  }
+
+  std::vector<char> pack_mcast_header(int src, std::vector<bool> &dest,
+                                      int data_size) {
+    /*Probably there is a more efficient way to do this*/
+    bool mcast = true;
+    std::bitset<NCORES> dst;
+    for (int i = 0; i < NCORES; i++) {
+      dst[i] = dest[i];
+    }
+    header_mcast_t hdr_struct{(bool)mcast, (uint64_t)src,
+                              (std::bitset<NCORES>)dst, (uint64_t)data_size};
+
+    auto ptr = reinterpret_cast<const char *>(&hdr_struct);
+    auto hdr = std::vector<char>(ptr, ptr + sizeof(hdr_struct));
 
     return hdr;
   }
@@ -540,7 +589,8 @@ private:
   void send_large_message(const std::vector<char> &msg, const int dest) {
     // Announce the large message and its size
     size_t size = msg.size();
-    // ASSERT_MPI(MPI_Send(&size, 8, MPI_BYTE, dest, large_message_announce_tag,
+    // ASSERT_MPI(MPI_Send(&size, 8, MPI_BYTE, dest,
+    // large_message_announce_tag,
     //                     m_comm_large_async));
 
     // Send message
@@ -765,7 +815,8 @@ private:
         final_send_buffers[hdr->dst]->insert(
             final_send_buffers[hdr->dst]->end(), begin_pack, (next_pack));
 
-        // std::cout<<"\n"<<"memcpy to "<<hdr->src<<" : "<<hdr->len<<" bytes\n";
+        // std::cout<<"\n"<<"memcpy to "<<hdr->src<<" : "<<hdr->len<<"
+        // bytes\n";
         step += hdr->len + sizeof(header_t);
         bitr += hdr->len + sizeof(header_t);
       }
@@ -800,7 +851,8 @@ private:
         final_send_buffers[hdr->dst]->insert(
             final_send_buffers[hdr->dst]->end(), begin_pack, (next_pack));
 
-        // std::cout<<"\n"<<"memcpy to "<<hdr->src<<" : "<<hdr->len<<" bytes\n";
+        // std::cout<<"\n"<<"memcpy to "<<hdr->src<<" : "<<hdr->len<<"
+        // bytes\n";
         step += hdr->len + sizeof(header_t);
         bitr += hdr->len + sizeof(header_t);
       }
@@ -903,10 +955,13 @@ private:
   int m_comm_remote_rank;
   size_t m_buffer_capacity;
 
+  std::vector<std::vector<bool>> dest_matrix;
+  std::set<int> node_list;
+
   std::vector<std::shared_ptr<std::vector<char>>> m_vec_send_buffers;
   std::vector<std::shared_ptr<std::vector<char>>> intermediate_send_buffers;
-  std::mutex final_send_buffers_mutex; // Both listener and application threads
-                                       // can flush this buffer
+  std::mutex final_send_buffers_mutex; // Both listener and application
+                                       // threads can flush this buffer
   std::vector<std::shared_ptr<std::vector<char>>> final_send_buffers;
   std::mutex m_vec_free_buffers_mutex;
   std::vector<std::shared_ptr<std::vector<char>>> m_vec_free_buffers;
@@ -970,6 +1025,14 @@ inline void comm::async(int dest, AsyncFunction fn, const SendArgs &...args) {
   static_assert(std::is_empty<AsyncFunction>::value,
                 "Only stateless lambdas are supported");
   pimpl->async(dest, fn, std::forward<const SendArgs>(args)...);
+}
+
+template <typename AsyncFunction, typename... SendArgs>
+inline void comm::async_mcast(std::vector<int> dest, AsyncFunction fn,
+                              const SendArgs &...args) {
+  static_assert(std::is_empty<AsyncFunction>::value,
+                "Only stateless lambdas are supported");
+  pimpl->async_mcast(dest, fn, std::forward<const SendArgs>(args)...);
 }
 
 inline int comm::size() const { return pimpl->size(); }

@@ -25,15 +25,19 @@ public:
   //
 
   template <typename AsyncFunction, typename... SendArgs>
-  void async(int dest, AsyncFunction fn, const SendArgs &... args);
+  void async(int dest, AsyncFunction fn, const SendArgs &...args);
+
+  template <typename AsyncFunction, typename... SendArgs>
+  void async_mcast(std::vector<int> dest, AsyncFunction fn,
+                   const SendArgs &...args);
 
   template <typename... SendArgs>
-  void async_preempt(int dest, const SendArgs &... args);
+  void async_preempt(int dest, const SendArgs &...args);
 
-  template <typename... SendArgs> void async_bcast(const SendArgs &... args);
+  template <typename... SendArgs> void async_bcast(const SendArgs &...args);
 
   template <typename... SendArgs>
-  void async_bcast_preempt(const SendArgs &... args);
+  void async_bcast_preempt(const SendArgs &...args);
 
   void async_flush(int rank);
   void async_flush_bcast();
@@ -106,21 +110,21 @@ public:
 
   bool rank0() const { return rank() == 0; }
 
-  template <typename... Args> void cout(Args &&... args) {
+  template <typename... Args> void cout(Args &&...args) {
     (cout() << ... << args) << std::endl;
   }
 
-  template <typename... Args> void cerr(Args &&... args) {
+  template <typename... Args> void cerr(Args &&...args) {
     (cerr() << ... << args) << std::endl;
   }
 
-  template <typename... Args> void cout0(Args &&... args) {
+  template <typename... Args> void cout0(Args &&...args) {
     if (rank0()) {
       (std::cout << ... << args) << std::endl;
     }
   }
 
-  template <typename... Args> void cerr0(Args &&... args) {
+  template <typename... Args> void cerr0(Args &&...args) {
     if (rank0()) {
       (std::cerr << ... << args) << std::endl;
     }
