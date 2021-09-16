@@ -8,6 +8,7 @@
 #include <atomic>
 #include <charconv>
 #include <deque>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -297,6 +298,13 @@ public:
       auto buffer = allocate_buffer();
       final_send_buffers[index]->push_back('\0'); // Nullterminating buffer
       std::swap(buffer, final_send_buffers[index]);
+      //---------------
+      std::ofstream dump_flush(
+          "/g/g92/ssriniv/ygm/build/performance/dump/flush/" +
+              std::to_string(m_comm_rank),
+          std::ofstream::app);
+      dump_flush << "\nfinal flushing " << buffer->size() << " to " << index;
+      //--------------
       ASSERT_MPI(MPI_Send(buffer->data(), buffer->size(), MPI_BYTE, index, 0,
                           m_comm_local));
       // std::cout << index << " getting bytes : " << buffer->size() << "\n";
