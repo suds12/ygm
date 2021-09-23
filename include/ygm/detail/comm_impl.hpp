@@ -15,11 +15,13 @@
 #include <ygm/detail/mpi.hpp>
 #include <ygm/detail/ygm_cereal_archive.hpp>
 #include <ygm/meta/functional.hpp>
+#define test_buffer_capacity 16 * 1024
+//#define test_buffer_capacity 35
 
 namespace ygm {
 
 class comm::impl {
- public:
+public:
   impl(MPI_Comm c, int buffer_capacity) {
     ASSERT_MPI(MPI_Comm_dup(c, &m_comm_async));
     ASSERT_MPI(MPI_Comm_dup(c, &m_comm_barrier));
@@ -54,7 +56,7 @@ class comm::impl {
   int rank() const { return m_comm_rank; }
 
   template <typename... SendArgs>
-  void async(int dest, const SendArgs &... args) {
+  void async(int dest, const SendArgs &...args) {
     ASSERT_DEBUG(dest < m_comm_size);
     if (dest == m_comm_rank) {
       local_receive(std::forward<const SendArgs>(args)...);
@@ -74,7 +76,7 @@ class comm::impl {
         // add data to the to dest buffer
         m_vec_send_buffers[dest]->insert(m_vec_send_buffers[dest]->end(),
                                          data.begin(), data.end());
-      } else {  // Large message
+      } else { // Large message
         send_large_message(data, dest);
       }
     }
@@ -85,24 +87,23 @@ class comm::impl {
   }
 
   template <typename... SendArgs>
-  void async_preempt(int dest, const SendArgs &... args) {
+  void async_preempt(int dest, const SendArgs &...args) {
     async(dest, std::forward<const SendArgs>(args)...);
   }
 
-  template <typename... SendArgs>
-  void async_bcast(const SendArgs &... args) {
+  template <typename... SendArgs> void async_bcast(const SendArgs &...args) {
     for (int dest = 0; dest < m_comm_size; ++dest) {
       async(dest, std::forward<const SendArgs>(args)...);
     }
   }
 
   template <typename... SendArgs>
-  void async_bcast_preempt(const SendArgs &... args) {
+  void async_bcast_preempt(const SendArgs &...args) {
     bcast(std::forward<const SendArgs>(args)...);
   }
 
   template <typename... SendArgs>
-  void async_mcast(const std::vector<int> &dests, const SendArgs &... args) {
+  void async_mcast(const std::vector<int> &dests, const SendArgs &...args) {
     for (auto dest : dests) {
       async(dest, std::forward<const SendArgs>(args)...);
     }
@@ -110,7 +111,7 @@ class comm::impl {
 
   template <typename... SendArgs>
   void async_mcast_preempt(const std::vector<int> &dests,
-                           const SendArgs &... args) {
+                           const SendArgs &...args) {
     mcast(dests, std::forward<const SendArgs>(args)...);
   }
 
@@ -146,8 +147,8 @@ class comm::impl {
     while (true) {
       wait_local_idle();
       MPI_Request req = MPI_REQUEST_NULL;
-      int64_t     first_all_count{-1};
-      int64_t     first_local_count = m_send_count - m_recv_count;
+      int64_t first_all_count{-1};
+      int64_t first_local_count = m_send_count - m_recv_count;
       ASSERT_MPI(MPI_Iallreduce(&first_local_count, &first_all_count, 1,
                                 MPI_INT64_T, MPI_SUM, m_comm_barrier, &req));
 
@@ -166,7 +167,7 @@ class comm::impl {
               return;
             }
           }
-          break;  // failed, start over
+          break; // failed, start over
         } else {
           wait_local_idle();
         }
@@ -210,7 +211,8 @@ class comm::impl {
   void async_flush(int dest) {
     if (dest != m_comm_rank) {
       // Skip dest == m_comm_rank;   Only kill messages go to self.
-      if (m_vec_send_buffers[dest]->size() == 0) return;
+      if (m_vec_send_buffers[dest]->size() == 0)
+        return;
       auto buffer = allocate_buffer();
       std::swap(buffer, m_vec_send_buffers[dest]);
       ASSERT_MPI(MPI_Send(buffer->data(), buffer->size(), MPI_BYTE, dest, 0,
@@ -235,24 +237,21 @@ class comm::impl {
 
   void reset_rpc_call_counter() { m_local_rpc_calls = 0; }
 
-  template <typename T>
-  T all_reduce_sum(const T &t) const {
+  template <typename T> T all_reduce_sum(const T &t) const {
     T to_return;
     ASSERT_MPI(MPI_Allreduce(&t, &to_return, 1, detail::mpi_typeof(T()),
                              MPI_SUM, m_comm_other));
     return to_return;
   }
 
-  template <typename T>
-  T all_reduce_min(const T &t) const {
+  template <typename T> T all_reduce_min(const T &t) const {
     T to_return;
     ASSERT_MPI(MPI_Allreduce(&t, &to_return, 1, detail::mpi_typeof(T()),
                              MPI_MIN, m_comm_other));
     return to_return;
   }
 
-  template <typename T>
-  T all_reduce_max(const T &t) const {
+  template <typename T> T all_reduce_max(const T &t) const {
     T to_return;
     ASSERT_MPI(MPI_Allreduce(&t, &to_return, 1, detail::mpi_typeof(T()),
                              MPI_MAX, m_comm_other));
@@ -261,7 +260,7 @@ class comm::impl {
 
   template <typename T>
   void mpi_send(const T &data, int dest, int tag, MPI_Comm comm) const {
-    std::vector<char>        packed;
+    std::vector<char> packed;
     cereal::YGMOutputArchive oarchive(packed);
     oarchive(data);
     size_t packed_size = packed.size();
@@ -271,17 +270,16 @@ class comm::impl {
     ASSERT_MPI(MPI_Send(packed.data(), packed_size, MPI_BYTE, dest, tag, comm));
   }
 
-  template <typename T>
-  T mpi_recv(int source, int tag, MPI_Comm comm) const {
+  template <typename T> T mpi_recv(int source, int tag, MPI_Comm comm) const {
     std::vector<char> packed;
-    size_t            packed_size{0};
+    size_t packed_size{0};
     ASSERT_MPI(MPI_Recv(&packed_size, 1, detail::mpi_typeof(packed_size),
                         source, tag, comm, MPI_STATUS_IGNORE));
     packed.resize(packed_size);
     ASSERT_MPI(MPI_Recv(packed.data(), packed_size, MPI_BYTE, source, tag, comm,
                         MPI_STATUS_IGNORE));
 
-    T                       to_return;
+    T to_return;
     cereal::YGMInputArchive iarchive(packed.data(), packed.size());
     iarchive(to_return);
     return to_return;
@@ -289,7 +287,7 @@ class comm::impl {
 
   template <typename T>
   T mpi_bcast(const T &to_bcast, int root, MPI_Comm comm) const {
-    std::vector<char>        packed;
+    std::vector<char> packed;
     cereal::YGMOutputArchive oarchive(packed);
     if (rank() == root) {
       oarchive(to_bcast);
@@ -304,7 +302,7 @@ class comm::impl {
     ASSERT_MPI(MPI_Bcast(packed.data(), packed_size, MPI_BYTE, root, comm));
 
     cereal::YGMInputArchive iarchive(packed.data(), packed.size());
-    T                       to_return;
+    T to_return;
     iarchive(to_return);
     return to_return;
   }
@@ -320,19 +318,19 @@ class comm::impl {
    */
   template <typename T, typename MergeFunction>
   T all_reduce(const T &in, MergeFunction merge) const {
-    int first_child  = 2 * rank() + 1;
+    int first_child = 2 * rank() + 1;
     int second_child = 2 * (rank() + 1);
-    int parent       = (rank() - 1) / 2;
+    int parent = (rank() - 1) / 2;
 
     // Step 1: Receive from children, merge into tmp
     T tmp = in;
     if (first_child < size()) {
       T fc = mpi_recv<T>(first_child, 0, m_comm_other);
-      tmp  = merge(tmp, fc);
+      tmp = merge(tmp, fc);
     }
     if (second_child < size()) {
       T sc = mpi_recv<T>(second_child, 0, m_comm_other);
-      tmp  = merge(tmp, sc);
+      tmp = merge(tmp, sc);
     }
 
     // Step 2: Send merged to parent
@@ -345,30 +343,74 @@ class comm::impl {
     return to_return;
   }
 
- private:
+private:
   /**
    * @brief Listener thread
    *
    */
+  // void listen() {
+  //   while (true) {
+  //     auto recv_buffer = allocate_buffer();
+  //     recv_buffer->resize(m_buffer_capacity); // TODO:  does this clear?
+  //     MPI_Status status;
+  //     ASSERT_MPI(MPI_Recv(recv_buffer->data(), m_buffer_capacity, MPI_BYTE,
+  //                         MPI_ANY_SOURCE, MPI_ANY_TAG, m_comm_async,
+  //                         &status));
+  //     int tag = status.MPI_TAG;
+
+  //     if (tag == large_message_announce_tag) {
+  //       // Determine size and source of message
+  //       size_t size = *(reinterpret_cast<size_t *>(recv_buffer->data()));
+  //       int src = status.MPI_SOURCE;
+
+  //       // Allocate large buffer
+  //       auto large_recv_buff = std::make_shared<std::vector<char>>(size);
+
+  //       // Receive large message
+  //       receive_large_message(large_recv_buff, src, size);
+
+  //       // Add buffer to receive queue
+  //       receive_queue_push_back(large_recv_buff, src);
+  //     } else {
+  //       int count;
+  //       ASSERT_MPI(MPI_Get_count(&status, MPI_BYTE, &count))
+  //       // std::cout << "RANK: " << rank() << " received count: " << count
+  //       //           << std::endl;
+  //       // Resize buffer to cout MPI actually received
+  //       recv_buffer->resize(count);
+
+  //       // Check for kill signal
+  //       if (status.MPI_SOURCE == m_comm_rank)
+  //         break;
+
+  //       // Add buffer to receive queue
+  //       receive_queue_push_back(recv_buffer, status.MPI_SOURCE);
+  //     }
+  //   }
+  // }
+  // Listen with probe
   void listen() {
     while (true) {
       auto recv_buffer = allocate_buffer();
-      recv_buffer->resize(m_buffer_capacity);  // TODO:  does this clear?
+      recv_buffer->resize(m_buffer_capacity);
       MPI_Status status;
-      ASSERT_MPI(MPI_Recv(recv_buffer->data(), m_buffer_capacity, MPI_BYTE,
-                          MPI_ANY_SOURCE, MPI_ANY_TAG, m_comm_async, &status));
-      int tag = status.MPI_TAG;
+      ASSERT_MPI(MPI_Probe(MPI_ANY_SOURCE, MPI_ANY_TAG, m_comm_async, &status));
 
-      if (tag == large_message_announce_tag) {
+      // recv_buffer->resize(m_buffer_capacity); // TODO:  does this clear?
+
+      int tag = status.MPI_TAG;
+      int src = status.MPI_SOURCE;
+
+      if (tag == large_message_tag) {
         // Determine size and source of message
-        size_t size = *(reinterpret_cast<size_t *>(recv_buffer->data()));
-        int    src  = status.MPI_SOURCE;
+        int count;
+        ASSERT_MPI(MPI_Get_count(&status, MPI_BYTE, &count))
 
         // Allocate large buffer
-        auto large_recv_buff = std::make_shared<std::vector<char>>(size);
+        auto large_recv_buff = std::make_shared<std::vector<char>>(count);
 
         // Receive large message
-        receive_large_message(large_recv_buff, src, size);
+        receive_large_message(large_recv_buff, src, count);
 
         // Add buffer to receive queue
         receive_queue_push_back(large_recv_buff, src);
@@ -378,10 +420,14 @@ class comm::impl {
         // std::cout << "RANK: " << rank() << " received count: " << count
         //           << std::endl;
         // Resize buffer to cout MPI actually received
+        ASSERT_MPI(MPI_Recv(recv_buffer->data(), m_buffer_capacity, MPI_BYTE,
+                            src, MPI_ANY_TAG, m_comm_async, MPI_STATUS_IGNORE));
+
         recv_buffer->resize(count);
 
         // Check for kill signal
-        if (status.MPI_SOURCE == m_comm_rank) break;
+        if (status.MPI_SOURCE == m_comm_rank)
+          break;
 
         // Add buffer to receive queue
         receive_queue_push_back(recv_buffer, status.MPI_SOURCE);
@@ -398,8 +444,8 @@ class comm::impl {
   void send_large_message(const std::vector<char> &msg, const int dest) {
     // Announce the large message and its size
     size_t size = msg.size();
-    ASSERT_MPI(MPI_Send(&size, 8, MPI_BYTE, dest, large_message_announce_tag,
-                        m_comm_async));
+    // ASSERT_MPI(MPI_Send(&size, 8, MPI_BYTE, dest, large_message_announce_tag,
+    //                     m_comm_async));
 
     // Send message
     ASSERT_MPI(MPI_Send(msg.data(), size, MPI_BYTE, dest, large_message_tag,
@@ -474,7 +520,7 @@ class comm::impl {
 
   // Used if dest = m_comm_rank
   template <typename Lambda, typename... Args>
-  int32_t local_receive(Lambda l, const Args &... args) {
+  int32_t local_receive(Lambda l, const Args &...args) {
     ASSERT_DEBUG(sizeof(Lambda) == 1);
     // Question: should this be std::forward(...)
     // \pp was: (l)(this, m_comm_rank, args...);
@@ -484,8 +530,8 @@ class comm::impl {
   }
 
   template <typename Lambda, typename... PackArgs>
-  std::vector<char> pack_lambda(Lambda l, const PackArgs &... args) {
-    std::vector<char>             to_return;
+  std::vector<char> pack_lambda(Lambda l, const PackArgs &...args) {
+    std::vector<char> to_return;
     const std::tuple<PackArgs...> tuple_args(
         std::forward<const PackArgs>(args)...);
     ASSERT_DEBUG(sizeof(Lambda) == 1);
@@ -495,14 +541,14 @@ class comm::impl {
           std::tuple<PackArgs...> ta;
           bia(ta);
           Lambda *pl;
-          auto    t1 = std::make_tuple((impl *)t, from);
+          auto t1 = std::make_tuple((impl *)t, from);
 
           // \pp was: std::apply(*pl, std::tuple_cat(t1, ta));
           ygm::meta::apply_optional(*pl, std::move(t1), std::move(ta));
         };
 
-    cereal::YGMOutputArchive oarchive(to_return);  // Create an output archive
-                                                   // // oarchive(fun_ptr);
+    cereal::YGMOutputArchive oarchive(to_return); // Create an output archive
+                                                  // // oarchive(fun_ptr);
     int64_t iptr = (int64_t)fun_ptr - (int64_t)&reference;
     oarchive(iptr, tuple_args);
 
@@ -516,8 +562,9 @@ class comm::impl {
     bool received = false;
     while (true) {
       auto buffer_source = receive_queue_try_pop();
-      auto buffer        = buffer_source.first;
-      if (buffer == nullptr) break;
+      auto buffer = buffer_source.first;
+      if (buffer == nullptr)
+        break;
       int from = buffer_source.second;
       received = true;
       cereal::YGMInputArchive iarchive(buffer->data(), buffer->size());
@@ -533,7 +580,8 @@ class comm::impl {
       }
 
       // Only keep buffers of size m_buffer_capacity in pool of buffers
-      if (buffer->capacity() == m_buffer_capacity) free_buffer(buffer);
+      if (buffer->capacity() == m_buffer_capacity)
+        free_buffer(buffer);
     }
     return received;
   }
@@ -541,17 +589,17 @@ class comm::impl {
   MPI_Comm m_comm_async;
   MPI_Comm m_comm_barrier;
   MPI_Comm m_comm_other;
-  int      m_comm_size;
-  int      m_comm_rank;
-  size_t   m_buffer_capacity;
+  int m_comm_size;
+  int m_comm_rank;
+  size_t m_buffer_capacity;
 
   std::vector<std::shared_ptr<std::vector<char>>> m_vec_send_buffers;
 
-  std::mutex                                      m_vec_free_buffers_mutex;
+  std::mutex m_vec_free_buffers_mutex;
   std::vector<std::shared_ptr<std::vector<char>>> m_vec_free_buffers;
 
   std::deque<std::pair<std::shared_ptr<std::vector<char>>, int>>
-             m_receive_queue;
+      m_receive_queue;
   std::mutex m_receive_queue_mutex;
 
   std::thread m_listener;
@@ -559,19 +607,20 @@ class comm::impl {
   int64_t m_recv_count = 0;
   int64_t m_send_count = 0;
 
-  int64_t m_local_rpc_calls  = 0;
+  int64_t m_local_rpc_calls = 0;
   int64_t m_local_bytes_sent = 0;
 
   int large_message_announce_tag = 32766;
-  int large_message_tag          = 32767;
+  int large_message_tag = 32767;
 };
 
-inline comm::comm(int *argc, char ***argv, int buffer_capacity = 16 * 1024) {
+inline comm::comm(int *argc, char ***argv,
+                  int buffer_capacity = test_buffer_capacity) {
   pimpl_if = std::make_shared<detail::mpi_init_finalize>(argc, argv);
-  pimpl    = std::make_shared<comm::impl>(MPI_COMM_WORLD, buffer_capacity);
+  pimpl = std::make_shared<comm::impl>(MPI_COMM_WORLD, buffer_capacity);
 }
 
-inline comm::comm(MPI_Comm mcomm, int buffer_capacity = 16 * 1024) {
+inline comm::comm(MPI_Comm mcomm, int buffer_capacity = test_buffer_capacity) {
   pimpl_if.reset();
   int flag(0);
   ASSERT_MPI(MPI_Initialized(&flag));
@@ -594,7 +643,7 @@ inline comm::~comm() {
 }
 
 template <typename AsyncFunction, typename... SendArgs>
-inline void comm::async(int dest, AsyncFunction fn, const SendArgs &... args) {
+inline void comm::async(int dest, AsyncFunction fn, const SendArgs &...args) {
   static_assert(std::is_empty<AsyncFunction>::value,
                 "Only stateless lambdas are supported");
   pimpl->async(dest, fn, std::forward<const SendArgs>(args)...);
@@ -602,14 +651,14 @@ inline void comm::async(int dest, AsyncFunction fn, const SendArgs &... args) {
 
 template <typename AsyncFunction, typename... SendArgs>
 inline void comm::async_preempt(int dest, AsyncFunction fn,
-                                const SendArgs &... args) {
+                                const SendArgs &...args) {
   static_assert(std::is_empty<AsyncFunction>::value,
                 "Only stateless lambdas are supported");
   pimpl->async_preempt(dest, fn, std::forward<const SendArgs>(args)...);
 }
 
 template <typename AsyncFunction, typename... SendArgs>
-inline void comm::async_bcast(AsyncFunction fn, const SendArgs &... args) {
+inline void comm::async_bcast(AsyncFunction fn, const SendArgs &...args) {
   static_assert(std::is_empty<AsyncFunction>::value,
                 "Only stateless lambdas are supported");
   pimpl->async_bcast(fn, std::forward<const SendArgs>(args)...);
@@ -617,7 +666,7 @@ inline void comm::async_bcast(AsyncFunction fn, const SendArgs &... args) {
 
 template <typename AsyncFunction, typename... SendArgs>
 inline void comm::async_bcast_preempt(AsyncFunction fn,
-                                      const SendArgs &... args) {
+                                      const SendArgs &...args) {
   static_assert(std::is_empty<AsyncFunction>::value,
                 "Only stateless lambdas are supported");
   pimpl->async_bcast_preempt(fn, std::forward<const SendArgs>(args)...);
@@ -625,7 +674,7 @@ inline void comm::async_bcast_preempt(AsyncFunction fn,
 
 template <typename AsyncFunction, typename... SendArgs>
 inline void comm::async_mcast(const std::vector<int> &dests, AsyncFunction fn,
-                              const SendArgs &... args) {
+                              const SendArgs &...args) {
   static_assert(std::is_empty<AsyncFunction>::value,
                 "Only stateless lambdas are supported");
   pimpl->async_mcast(dests, fn, std::forward<const SendArgs>(args)...);
@@ -633,8 +682,8 @@ inline void comm::async_mcast(const std::vector<int> &dests, AsyncFunction fn,
 
 template <typename AsyncFunction, typename... SendArgs>
 inline void comm::async_mcast_preempt(const std::vector<int> &dests,
-                                      AsyncFunction           fn,
-                                      const SendArgs &... args) {
+                                      AsyncFunction fn,
+                                      const SendArgs &...args) {
   static_assert(std::is_empty<AsyncFunction>::value,
                 "Only stateless lambdas are supported");
   pimpl->async_mcast_preempt(dests, fn, std::forward<const SendArgs>(args)...);
@@ -671,18 +720,15 @@ inline void comm::async_flush(int rank) { pimpl->async_flush(rank); }
 
 inline void comm::async_flush_all() { pimpl->async_flush_all(); }
 
-template <typename T>
-inline T comm::all_reduce_sum(const T &t) const {
+template <typename T> inline T comm::all_reduce_sum(const T &t) const {
   return pimpl->all_reduce_sum(t);
 }
 
-template <typename T>
-inline T comm::all_reduce_min(const T &t) const {
+template <typename T> inline T comm::all_reduce_min(const T &t) const {
   return pimpl->all_reduce_min(t);
 }
 
-template <typename T>
-inline T comm::all_reduce_max(const T &t) const {
+template <typename T> inline T comm::all_reduce_max(const T &t) const {
   return pimpl->all_reduce_max(t);
 }
 
@@ -691,4 +737,4 @@ inline T comm::all_reduce(const T &t, MergeFunction merge) {
   return pimpl->all_reduce(t, merge);
 }
 
-}  // namespace ygm
+} // namespace ygm
