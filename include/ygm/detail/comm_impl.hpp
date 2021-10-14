@@ -51,16 +51,14 @@ public:
       std::cout << "\nYGM buffer capacity = " << m_buffer_capacity << "\n";
     }
     // launch listener threads
-    m_large_listener = std::thread(&impl::listen_large, this);
+    // m_large_listener = std::thread(&impl::listen_large, this);
     m_local_listener = std::thread(&impl::listen_local, this);
     m_remote_listener = std::thread(&impl::listen_remote, this);
   }
 
   ~impl() {
     barrier();
-    // send kill signal to self (large listener thread)
-    MPI_Send(NULL, 0, MPI_BYTE, m_comm_rank, kill_message_tag,
-             m_comm_large_async);
+
     // send kill signal to self (local listener thread)
     MPI_Send(NULL, 0, MPI_BYTE, m_comm_local_rank, kill_message_tag,
              m_comm_local);
@@ -69,7 +67,7 @@ public:
              m_comm_remote);
 
     // Join listener threads.
-    m_large_listener.join();
+
     m_local_listener.join();
     m_remote_listener.join();
     // Free cloned communicator.
@@ -101,8 +99,8 @@ public:
           pack_lambda(std::forward<const SendArgs>(args)...);
       m_local_bytes_sent += data.size();
 
+      auto header = pack_header(rank(), dest_index.first, data.size());
       if (data.size() + sizeof(header_t) < m_buffer_capacity) {
-        auto header = pack_header(rank(), dest_index.first, data.size());
 
         if (data.size() + header.size() +
                 intermediate_send_buffers[dest_index.second]->size() >
@@ -119,7 +117,7 @@ public:
             data.end());
 
       } else { // Large message
-        send_large_message(data, dest);
+        send_large_message(data, header, dest_index.second);
       }
     }
 
@@ -298,13 +296,7 @@ public:
       auto buffer = allocate_buffer();
       final_send_buffers[index]->push_back('\0'); // Nullterminating buffer
       std::swap(buffer, final_send_buffers[index]);
-      //---------------
-      std::ofstream dump_flush(
-          "/g/g92/ssriniv/ygm/build/performance/dump/flush/" +
-              std::to_string(m_comm_rank),
-          std::ofstream::app);
-      dump_flush << "\nfinal flushing " << buffer->size() << " to " << index;
-      //--------------
+
       ASSERT_MPI(MPI_Send(buffer->data(), buffer->size(), MPI_BYTE, index, 0,
                           m_comm_local));
       // std::cout << index << " getting bytes : " << buffer->size() << "\n";
@@ -465,71 +457,82 @@ private:
    * @brief Listener thread
    *
    */
-  void listen_large() {
-    while (true) {
-      MPI_Status status;
-      ASSERT_MPI(
-          MPI_Probe(MPI_ANY_SOURCE, MPI_ANY_TAG, m_comm_large_async, &status));
-      // Kill message
-      if (status.MPI_TAG == kill_message_tag) {
-        ASSERT_MPI(MPI_Recv(NULL, 0, MPI_BYTE, status.MPI_SOURCE, MPI_ANY_TAG,
-                            m_comm_large_async, MPI_STATUS_IGNORE));
-        break;
-      }
-      int tag = status.MPI_TAG;
-      int src = status.MPI_SOURCE;
-      int count;
-      ASSERT_DEBUG(tag == large_message_tag);
-      ASSERT_MPI(MPI_Get_count(&status, MPI_BYTE, &count))
-      // Allocate large buffer
-      auto large_recv_buff = std::make_shared<std::vector<char>>(count);
-      // Receive large message
-      receive_large_message(large_recv_buff, src, count);
-      // Add buffer to arrival queue
-      arrival_queue_push_back(large_recv_buff, src);
-    }
-  }
+  // void listen_large() {
+  //   while (true) {
+  //     MPI_Status status;
+  //     ASSERT_MPI(
+  //         MPI_Probe(MPI_ANY_SOURCE, MPI_ANY_TAG, m_comm_large_async,
+  //         &status));
+  //     // Kill message
+  //     if (status.MPI_TAG == kill_message_tag) {
+  //       ASSERT_MPI(MPI_Recv(NULL, 0, MPI_BYTE, status.MPI_SOURCE,
+  //       MPI_ANY_TAG,
+  //                           m_comm_large_async, MPI_STATUS_IGNORE));
+  //       break;
+  //     }
+  //     int tag = status.MPI_TAG;
+  //     int src = status.MPI_SOURCE;
+  //     int count;
+  //     ASSERT_DEBUG(tag == large_message_tag);
+  //     ASSERT_MPI(MPI_Get_count(&status, MPI_BYTE, &count))
+  //     // Allocate large buffer
+  //     auto large_recv_buff = std::make_shared<std::vector<char>>(count);
+  //     // Receive large message
+  //     receive_large_message(large_recv_buff, src, count);
+  //     // Add buffer to arrival queue
+  //     arrival_queue_push_back(large_recv_buff, src);
+  //   }
+  // }
 
   void listen_remote() {
     while (true) {
       auto recv_buffer = allocate_buffer();
-      recv_buffer->resize(m_buffer_capacity); // TODO:  does this clear?
+      // recv_buffer->resize(m_buffer_capacity); // TODO:  does this clear?
       MPI_Status status;
-      ASSERT_MPI(MPI_Recv(recv_buffer->data(), m_buffer_capacity, MPI_BYTE,
-                          MPI_ANY_SOURCE, MPI_ANY_TAG, m_comm_remote, &status));
+      ASSERT_MPI(
+          MPI_Probe(MPI_ANY_SOURCE, MPI_ANY_TAG, m_comm_remote, &status));
+      if (status.MPI_TAG == kill_message_tag)
+        break;
 
       int count;
       ASSERT_MPI(MPI_Get_count(&status, MPI_BYTE, &count))
       recv_buffer->resize(count);
-      // Check for kill signal
-      if (status.MPI_TAG == kill_message_tag)
-        break;
 
-      // Add buffer to receive queue
-      // transit_queue_push_back(recv_buffer, -5);
-      char *bitr = &recv_buffer->at(0);
+      ASSERT_MPI(MPI_Recv(recv_buffer->data(), m_buffer_capacity, MPI_BYTE,
+                          MPI_ANY_SOURCE, MPI_ANY_TAG, m_comm_remote, &status));
+      if (status.MPI_TAG == large_message_tag) {
+        route_large_message(recv_buffer, count);
+      } else {
+        transit_queue_push_back(recv_buffer, -5);
+      }
+      // char *bitr = &recv_buffer->at(0);
 
-      // transit_buffer_process(bitr, count);
-      transit_queue_push_back(recv_buffer, -8);
+      // // transit_buffer_process(bitr, count);
+      // transit_queue_push_back(recv_buffer, -8);
     }
   }
 
   void listen_local() {
     while (true) {
       auto recv_buffer = allocate_buffer();
-      recv_buffer->resize(m_buffer_capacity); // TODO:  does this clear?
+      // recv_buffer->resize(m_buffer_capacity); // TODO:  does this clear?
       MPI_Status status;
-      ASSERT_MPI(MPI_Recv(recv_buffer->data(), m_buffer_capacity, MPI_BYTE,
-                          MPI_ANY_SOURCE, MPI_ANY_TAG, m_comm_local, &status));
 
+      ASSERT_MPI(MPI_Probe(MPI_ANY_SOURCE, MPI_ANY_TAG, m_comm_local, &status));
+      if (status.MPI_TAG == kill_message_tag)
+        break;
       int count;
       ASSERT_MPI(MPI_Get_count(&status, MPI_BYTE, &count))
       recv_buffer->resize(count);
-      // Check for kill signal
-      if (status.MPI_TAG == kill_message_tag)
-        break;
-      // Add buffer to receive queue
-      arrival_queue_push_back(recv_buffer, -10);
+
+      ASSERT_MPI(MPI_Recv(recv_buffer->data(), m_buffer_capacity, MPI_BYTE,
+                          MPI_ANY_SOURCE, MPI_ANY_TAG, m_comm_local, &status));
+
+      if (status.MPI_TAG == large_message_tag) {
+        arrival_queue_push_back(recv_buffer, count);
+      } else {
+        arrival_queue_push_back(recv_buffer, -5);
+      }
     }
   }
 
@@ -548,7 +551,8 @@ private:
    * @param dest Destination for message
    * @param msg Packed message to send
    */
-  void send_large_message(const std::vector<char> &msg, const int dest) {
+  void send_large_message(const std::vector<char> &msg,
+                          const std::vector<char> &hdr, const int dest) {
     // Announce the large message and its size
     size_t size = msg.size();
     // ASSERT_MPI(MPI_Send(&size, 8, MPI_BYTE, dest, large_message_announce_tag,
@@ -565,8 +569,8 @@ private:
    * @param src Source of message
    * @param msg Buffer to hold message
    */
-  void receive_large_message(std::shared_ptr<std::vector<char>> msg,
-                             const int src, const size_t size) {
+  void receive_message(std::shared_ptr<std::vector<char>> msg, const int src,
+                       const size_t size) {
     ASSERT_MPI(MPI_Recv(msg->data(), size, MPI_BYTE, src, large_message_tag,
                         m_comm_large_async, MPI_STATUS_IGNORE));
   }
@@ -740,6 +744,17 @@ private:
   //   return received;
   // }
 
+  void route_large_message(std::shared_ptr<std::vector<char>> buffer,
+                           int count) {
+    int step = 0;
+    char *hdr_stream = &(buffer->at(0));
+    header_t *hdr = reinterpret_cast<header_t *>(hdr_stream);
+
+    // Send message
+    ASSERT_MPI(MPI_Send(buffer->data(), count, MPI_BYTE, hdr->dst,
+                        large_message_tag, m_comm_local));
+  }
+
   bool transit_queue_process() {
     bool received = false;
     while (true) {
@@ -787,36 +802,37 @@ private:
     return received;
   }
 
-  void transit_buffer_process(char *bitr, int buffer_size) {
-    int step = 0;
-    {
-      std::scoped_lock lock(final_send_buffers_mutex);
-      while (step != buffer_size - 1) {
-        ASSERT_DEBUG(step < buffer_size);
+  // void transit_buffer_process(char *bitr, int buffer_size) {
+  //   int step = 0;
+  //   {
+  //     std::scoped_lock lock(final_send_buffers_mutex);
+  //     while (step != buffer_size - 1) {
+  //       ASSERT_DEBUG(step < buffer_size);
 
-        char *hdr_stream = &(*bitr);
-        header_t *hdr = reinterpret_cast<header_t *>(hdr_stream);
-        // std::cout<<"\n"<<rank()<<" is taking step  : "<<step<<" len:
-        // "<<hdr->len<<"\n";
+  //       char *hdr_stream = &(*bitr);
+  //       header_t *hdr = reinterpret_cast<header_t *>(hdr_stream);
+  //       // std::cout<<"\n"<<rank()<<" is taking step  : "<<step<<" len:
+  //       // "<<hdr->len<<"\n";
 
-        char *begin_pack = &(*bitr);
-        char *next_pack =
-            begin_pack + hdr->len + sizeof(header_t); // pack = header + data
+  //       char *begin_pack = &(*bitr);
+  //       char *next_pack =
+  //           begin_pack + hdr->len + sizeof(header_t); // pack = header + data
 
-        if (hdr->len + sizeof(header_t) + final_send_buffers[hdr->dst]->size() >
-            m_buffer_capacity - sizeof(char)) {
-          async_final_flush(hdr->dst);
-        }
+  //       if (hdr->len + sizeof(header_t) +
+  //       final_send_buffers[hdr->dst]->size() >
+  //           m_buffer_capacity - sizeof(char)) {
+  //         async_final_flush(hdr->dst);
+  //       }
 
-        final_send_buffers[hdr->dst]->insert(
-            final_send_buffers[hdr->dst]->end(), begin_pack, (next_pack));
+  //       final_send_buffers[hdr->dst]->insert(
+  //           final_send_buffers[hdr->dst]->end(), begin_pack, (next_pack));
 
-        // std::cout<<"\n"<<"memcpy to "<<hdr->src<<" : "<<hdr->len<<" bytes\n";
-        step += hdr->len + sizeof(header_t);
-        bitr += hdr->len + sizeof(header_t);
-      }
-    }
-  }
+  //       // std::cout<<"\n"<<"memcpy to "<<hdr->src<<" : "<<hdr->len<<"
+  //       bytes\n"; step += hdr->len + sizeof(header_t); bitr += hdr->len +
+  //       sizeof(header_t);
+  //     }
+  //   }
+  // }
 
   bool arrival_queue_process() {
     bool received = false;
@@ -853,7 +869,7 @@ private:
           cereal::YGMInputArchive iarchive(begin_msg, hdr->len);
           int64_t iptr;
           iarchive(iptr);
-
+          std::cout << "large ..\n";
           iptr += (int64_t)&reference;
           void (*fun_ptr)(impl *, int, cereal::YGMInputArchive &);
           memcpy(&fun_ptr, &iptr, sizeof(uint64_t));
@@ -874,14 +890,24 @@ private:
     return received;
   }
   void process_large_buffer(char *bitr, int from, int buffer_size) {
-    cereal::YGMInputArchive iarchive(bitr, buffer_size);
-    while (!iarchive.empty()) {
+    int step = 0;
+    while (step != buffer_size - 1) {
+      ASSERT_DEBUG(step < buffer_size);
+
+      char *hdr_stream = &(*bitr);
+      header_t *hdr = reinterpret_cast<header_t *>(hdr_stream);
+      // std::cout<<"\n"<<rank()<<" is taking step  : "<<step<<" len:
+      // "<<hdr->len<<"\n";
+      char *begin_msg = &(*bitr) + sizeof(header_t);
+
+      cereal::YGMInputArchive iarchive(begin_msg, hdr->len);
+
       int64_t iptr;
       iarchive(iptr);
       iptr += (int64_t)&reference;
       void (*fun_ptr)(impl *, int, cereal::YGMInputArchive &);
       memcpy(&fun_ptr, &iptr, sizeof(uint64_t));
-      fun_ptr(this, from, iarchive);
+      fun_ptr(this, hdr->src, iarchive);
       m_recv_count++;
     }
   }
@@ -916,8 +942,8 @@ private:
 
   std::vector<std::shared_ptr<std::vector<char>>> m_vec_send_buffers;
   std::vector<std::shared_ptr<std::vector<char>>> intermediate_send_buffers;
-  std::mutex final_send_buffers_mutex; // Both listener and application threads
-                                       // can flush this buffer
+  std::mutex final_send_buffers_mutex; // Both listener and application
+                                       // threads can flush this buffer
   std::vector<std::shared_ptr<std::vector<char>>> final_send_buffers;
   std::mutex m_vec_free_buffers_mutex;
   std::vector<std::shared_ptr<std::vector<char>>> m_vec_free_buffers;
@@ -932,7 +958,7 @@ private:
   std::mutex m_transit_queue_mutex;
   std::mutex m_arrival_queue_mutex;
 
-  std::thread m_large_listener;
+  // std::thread m_large_listener;
   // std::thread m_small_listener;
   std::thread m_local_listener;
   std::thread m_remote_listener;
